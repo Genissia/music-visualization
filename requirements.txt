@@ -4,7 +4,7 @@ moderngl
 PyGLM
 Pillow
 # cupy may require a specific version based on your CUDA version (e.g., cupy-cuda12x)
-cupy
+cupy-cuda13x
 perlin-noise
 
 # System dependencies:
