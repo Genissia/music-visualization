@@ -23,14 +23,12 @@ import subprocess
 import time
 import argparse
 from concurrent.futures import ThreadPoolExecutor
-from io import BytesIO
 
-import numpy as np
 from PIL import Image
 
 from audio_process import extract_audio_frames
 from terrain_gen   import create_terrain_frame
-from renderer      import TerrainRenderer
+from landscape_visualizer.render.renderer import TerrainRenderer
 
 
 # ---------------------------------------------------------------------------
@@ -67,7 +65,7 @@ def generate_video(
     grid_size    : Terrain mesh resolution (N × N).  150 is a good balance.
     workers      : Thread pool size for parallel PNG saving.
     """
-    temp_dir = "temp_frames"
+    temp_dir = "song_files"
 
     # ------------------------------------------------------------------
     # 0. Preparation
