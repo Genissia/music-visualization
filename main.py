@@ -6,22 +6,23 @@ import argparse
 import numpy as np
 
 from audio_process import extract_audio_frames
-from terrain_gen   import create_terrain_frame
-from renderer      import TerrainRenderer
+from terrain_gen import create_terrain_frame
+from renderer import TerrainRenderer
 
 
 def _progress_bar(current: int, total: int, bar_width: int = 30) -> str:
-    frac   = current / max(total, 1)
+    """Generates a clean, visual text progress bar for the console."""
+    frac = current / max(total, 1)
     filled = int(bar_width * frac)
-    bar    = "█" * filled + "░" * (bar_width - filled)
-    return f"[{bar}] {current}/{total} ({frac*100:.1f}%)"
+    bar = "█" * filled + "░" * (bar_width - filled)
+    return f"[{bar}] {current}/{total} ({frac * 100:.1f}%)"
 
 
 def generate_video(
-    audio_path:   str,
-    output_video: str = "output.mp4",
-    fps:          int = 60,
-    grid_size:    int = 150,
+        audio_path: str,
+        output_video: str = "output.mp4",
+        fps: int = 60,
+        grid_size: int = 150,
 ):
     # ------------------------------------------------------------------
     # 1. Audio analysis
@@ -55,29 +56,34 @@ def generate_video(
     print("STEP 3 / 3  –  Cinematic Stream Render (In-Memory)")
     print("=" * 60)
 
-    # We configure FFmpeg to read raw video bytes directly from standard input (stdin)
+    # Configure FFmpeg to accept raw byte buffers via standard input (stdin)
     ffmpeg_cmd = [
         "ffmpeg", "-y",
-        "-f", "rawvideo",                  # Input format is raw pixels
-        "-pix_fmt", "rgb24",               # 3 channels (Red, Green, Blue), 8 bits each
-        "-s", f"{renderer.RENDER_WIDTH}x{renderer.RENDER_HEIGHT}", # Target resolution
-        "-framerate", str(fps),            # Video frame rate
-        "-i", "pipe:0",                    # Read video frames from Python memory stream (stdin)
-        "-i", audio_path,                  # Second input source is the audio file
-        "-c:v",     "libx264",
-        "-preset",  "fast",
-        "-crf",     "18",
-        "-pix_fmt", "yuv420p",
-        "-c:a",     "aac",
-        "-b:a",     "320k",
-        "-ac",      "2",
-        "-shortest",
+        "-f", "rawvideo",  # Input format is uncompressed raw pixels
+        "-pix_fmt", "rgb24",  # 3 channels (RGB), 8 bits per channel
+        "-s", f"{renderer.RENDER_WIDTH}x{renderer.RENDER_HEIGHT}",
+        "-framerate", str(fps),  # Video frame rate matches audio sync
+        "-i", "pipe:0",  # Read video frames directly from Python RAM
+        "-i", audio_path,  # Second input source is our audio file
+        "-c:v", "libx264",  # H.264 video codec
+        "-preset", "fast",
+        "-crf", "18",  # High-quality visually lossless ceiling
+        "-pix_fmt", "yuv420p",  # Ensures max compatibility with media players
+        "-c:a", "aac",  # Compress audio stream to AAC
+        "-b:a", "320k",  # High-fidelity audio bitrate
+        "-ac", "2",  # Stereo channel output
+        "-shortest",  # Terminate clip when the shorter stream (audio) ends
         output_video,
     ]
 
     try:
-        # Launch FFmpeg as an active asynchronous background process
-        ffmpeg_process = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        # Launch FFmpeg. stderr is directed to DEVNULL to avoid OS pipe deadlock buffer limitations.
+        ffmpeg_process = subprocess.Popen(
+            ffmpeg_cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
         print("  ✓ FFmpeg process pipe established successfully.")
     except FileNotFoundError:
         print("\n  ✗ FFmpeg not found. Install it and add it to your PATH.")
@@ -86,55 +92,54 @@ def generate_video(
     start_time = time.time()
 
     # ------------------------------------------------------------------
-    # Core Stream Loop
+    # Core In-Memory Stream Loop
     # ------------------------------------------------------------------
     for i in range(num_frames):
-        frame_spec   = spectrogram[i]
-        frame_bands  = {k: float(v[i]) for k, v in band_energies.items()}
-        frame_beat   = float(beat_frames[i])
+        frame_spec = spectrogram[i]
+        frame_bands = {k: float(v[i]) for k, v in band_energies.items()}
+        frame_beat = float(beat_frames[i])
 
         # Generate terrain coordinates
         X, Y, Z = create_terrain_frame(
-            audio_frame   = frame_spec,
-            band_energies = frame_bands,
-            beat_pulse    = frame_beat,
-            grid_size     = grid_size,
-            frame_index   = i,
+            audio_frame=frame_spec,
+            band_energies=frame_bands,
+            beat_pulse=frame_beat,
+            grid_size=grid_size,
+            frame_index=i,
         )
 
-        # Render frame (Returns a PIL Image object)
+        # Render frame to a PIL Image object
         img = renderer.render_frame(
-            X_gpu         = X,
-            Y_gpu         = Y,
-            Z_gpu         = Z,
-            frame_index   = i,
-            total_frames  = num_frames,
-            band_energies = frame_bands,
-            beat_pulse    = frame_beat,
-            frame_path    = None,
+            X_gpu=X,
+            Y_gpu=Y,
+            Z_gpu=Z,
+            frame_index=i,
+            total_frames=num_frames,
+            band_energies=frame_bands,
+            beat_pulse=frame_beat,
+            frame_path=None,
         )
 
-        # --- THE MAGIC TRICK ---
-        # Convert the PIL image directly into a sequential stream of binary RGB bytes
+        # Convert the PIL image structure into raw, linear RGB bytes
         raw_rgb_bytes = img.tobytes()
 
-        # Shove the raw bytes down the standard input pipe directly into FFmpeg
+        # Inject the frame bytes straight into the background FFmpeg stream
         ffmpeg_process.stdin.write(raw_rgb_bytes)
 
-        # Progress tracking
-        if i % 100 == 0 or i == num_frames - 1:
-            elapsed   = time.time() - start_time
-            speed     = (i + 1) / elapsed if elapsed > 0 else 0
-            eta       = (num_frames - i - 1) / speed if speed > 0 else 0
-            bar       = _progress_bar(i + 1, num_frames)
-            print(f"  {bar}  |  {speed:.1f} fps  |  ETA {eta:.0f}s")
+        # Console Progress Tracking
+        if i % 10 == 0 or i == num_frames - 1:
+            elapsed = time.time() - start_time
+            speed = (i + 1) / elapsed if elapsed > 0 else 0
+            eta = (num_frames - i - 1) / speed if speed > 0 else 0
+            bar = _progress_bar(i + 1, num_frames)
+            print(f"  {bar}  |  {speed:.1f} fps  |  ETA {eta:.0f}s", end="\r")
 
-    # Clean close: Tell FFmpeg we are completely out of video frames
-    print("\n  Closing memory streams and rendering final video file...")
+    # Clean close: Inform FFmpeg that no more video bytes are coming
+    print("\n\n  Closing memory streams and rendering final video file...")
     ffmpeg_process.stdin.close()
 
-    # Wait for FFmpeg to finish packaging the audio track and video into the MP4 container
-    _, stderr = ffmpeg_process.communicate()
+    # Wait for the background compiler to finish containerizing the video and audio tracks
+    ffmpeg_process.communicate()
 
     total_render_time = time.time() - start_time
 
@@ -143,7 +148,7 @@ def generate_video(
         print(f"\n  ✓ SUCCESS: '{output_video}' ({size_mb:.1f} MB)")
         print(f"  Total render time: {total_render_time:.1f}s ({num_frames / total_render_time:.1f} fps average)")
     else:
-        print(f"\n  ✗ FFmpeg compilation failed:\n{stderr.decode()}")
+        print(f"\n  ✗ FFmpeg compilation failed. Verify your source audio file formats or encoder path variables.")
 
 
 if __name__ == "__main__":
@@ -159,8 +164,8 @@ if __name__ == "__main__":
         raise SystemExit(1)
 
     generate_video(
-        audio_path   = args.audio,
-        output_video = args.output,
-        fps          = args.fps,
-        grid_size    = args.grid,
+        audio_path=args.audio,
+        output_video=args.output,
+        fps=args.fps,
+        grid_size=args.grid,
     )
