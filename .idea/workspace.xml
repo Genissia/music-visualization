@@ -4,14 +4,10 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="d46ed2bd-e020-4c22-887a-dbd93a4f2b3f" name="Changes" comment="new video works">
+    <list default="true" id="d46ed2bd-e020-4c22-887a-dbd93a4f2b3f" name="Changes" comment="is it working">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/main.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/output.mp4" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/sma$her &amp; MXZI - ACELERADA.flac" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/test_frame.png" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/test_song.mp3" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/test_song1.mp3" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/renderer.py" beforeDir="false" afterPath="$PROJECT_DIR$/renderer.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -156,7 +152,15 @@
       <option name="project" value="LOCAL" />
       <updated>1783348459772</updated>
     </task>
-    <option name="localTasksCounter" value="6" />
+    <task id="LOCAL-00006" summary="is it working">
+      <option name="closed" value="true" />
+      <created>1783351503802</created>
+      <option name="number" value="00006" />
+      <option name="presentableId" value="LOCAL-00006" />
+      <option name="project" value="LOCAL" />
+      <updated>1783351503802</updated>
+    </task>
+    <option name="localTasksCounter" value="7" />
     <servers />
   </component>
   <component name="Vcs.Log.Tabs.Properties">
@@ -176,6 +180,7 @@
     <MESSAGE value="without picture frames" />
     <MESSAGE value="without picture frames updated no ffmpeg logs" />
     <MESSAGE value="new video works" />
-    <option name="LAST_COMMIT_MESSAGE" value="new video works" />
+    <MESSAGE value="is it working" />
+    <option name="LAST_COMMIT_MESSAGE" value="is it working" />
   </component>
 </project>

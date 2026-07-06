@@ -1,196 +1,169 @@
-"""
-renderer.py
------------
-ModernGL headless 3-D terrain renderer with a proper cinematic camera system.
-
-Camera philosophy (the fix):
-  The previous camera started at cam_y=0.5 with radius=4.0, meaning the
-  camera was practically INSIDE the terrain waves — all you saw was chaos.
-  The new camera uses a three-act structure that always keeps the full
-  landscape in view:
-
-    Act 1 (0%–30%)  : "Establishing shot"
-      High and far back (like a drone reveal).  You can see the entire
-      terrain laid out below you.  The camera slowly descends toward a
-      comfortable 3/4 top-down angle.
-
-    Act 2 (30%–70%) : "Immersive cruise"
-      Camera locks to a low-angle perspective shot — similar to flying
-      just above the terrain at a 25-30° tilt.  This is the "music video"
-      angle where you actually see the ridges rising and falling with the
-      music.  Horizontal orbit is SLOW so the landscape scrolls past you
-      rather than spinning wildly.
-
-    Act 3 (70%–100%): "Pull-back reveal"
-      Camera rises and zooms out again for a grand ending wide shot.
-
-  All three acts blend smoothly using hermite (smoothstep) curves so there
-  are no jarring jumps between them.
-
-Other changes in this file:
-  - FOV widened from 45° → 60°  so more terrain is visible at any position.
-  - lookAt target is slightly in FRONT of the camera, not at world origin,
-    so the camera always looks toward the "horizon" of the terrain rather
-    than back at the centre point.
-  - VERT_SCALE raised 0.035 → 0.055 so the terrain peaks are taller and
-    the height variation is actually visible from a distance.
-  - Fog start pushed farther out so the full terrain width is clear.
-"""
-
 import moderngl
 import numpy as np
 from pyglm import glm
-from PIL import Image, ImageFilter, ImageChops
+from PIL import Image, ImageFilter, ImageChops, ImageDraw
 
-
-# ---------------------------------------------------------------------------
-# Helper utilities
-# ---------------------------------------------------------------------------
-
-def _smoothstep(edge0: float, edge1: float, x: float) -> float:
-    """
-    Hermite smooth-step: maps x from [edge0, edge1] → [0, 1] with ease-in/out.
-    """
-    t = max(0.0, min(1.0, (x - edge0) / (edge1 - edge0 + 1e-9)))
-    return t * t * (3.0 - 2.0 * t)
-
-
-def _lerp(a: float, b: float, t: float) -> float:
-    """Linear interpolation between a and b by factor t (0-1)."""
-    return a + (b - a) * t
-
-
-# ---------------------------------------------------------------------------
-# Main renderer class
-# ---------------------------------------------------------------------------
 
 class TerrainRenderer:
     """
-    Renders 3-D terrain meshes to PNG images using off-screen OpenGL.
-    Fully compatible with both CuPy (NVIDIA CUDA) and NumPy (AMD/Intel CPU) inputs.
+    Renders a 3D musical highway pass flanked by harmonic wave mountains.
+    Directly simulates wave interference patterns inspired by image_ed6e44.png,
+    propagating them over time to mimic continuous forward driving motion.
     """
 
     # ------------------------------------------------------------------
-    # TWEAK PANEL
+    # CINEMATIC WAVE-HIGHWAY PANEL
     # ------------------------------------------------------------------
-    RENDER_WIDTH    = 720
-    RENDER_HEIGHT   = 720
+    RENDER_WIDTH = 720
+    RENDER_HEIGHT = 720
 
-    # How much the Y values from terrain_gen are exaggerated vertically.
-    VERT_SCALE      = 0.040
+    BASE_WAVE_HEIGHT = 0.350  # Fundamental baseline height of the wave crests
+    HIGHWAY_WIDTH = 0.280  # Size of the flat driving lane before waves start rising
+    FOV_DEGREES = 65.0  # Field-of-view tracking
 
-    # Field of view in degrees.
-    FOV_DEGREES     = 45.0
+    # Fog clipping boundaries
+    FOG_NEAR = 0.1
+    FOG_FAR = 6.0
 
-    # Beat camera shake — how many world-units the camera jolts on a beat
-    SHAKE_INTENSITY = 0.15
+    # Post-process bloom configuration
+    BLOOM_THRESHOLD = 110
+    BLOOM_RADIUS = 8
+    BLOOM_STRENGTH = 0.45
 
-    # Fog — terrain beyond FOG_FAR fades to the background colour.
-    FOG_NEAR        = 5.0
-    FOG_FAR         = 18.0
-
-    # Bloom post-process
-    BLOOM_THRESHOLD = 180    # pixel brightness (0–255) above which glow applies
-    BLOOM_RADIUS    = 12     # Gaussian blur radius for the glow halo
-    BLOOM_STRENGTH  = 0.45   # additive blend factor (0 = no bloom, 1 = full)
     # ------------------------------------------------------------------
 
     def __init__(self, grid_size: int):
         self.grid_size = grid_size
         w, h = self.RENDER_WIDTH, self.RENDER_HEIGHT
 
-        # 1. Headless OpenGL context
+        # 1. Initialize standalone headless graphics context
         self.ctx = moderngl.create_standalone_context()
         self.ctx.enable(moderngl.DEPTH_TEST)
 
-        # 2. Off-screen framebuffer
+        # 2. Allocation of render framebuffers
         self.fbo = self.ctx.framebuffer(
             color_attachments=[self.ctx.texture((w, h), 4)],
             depth_attachment=self.ctx.depth_renderbuffer((w, h)),
         )
 
-        # 3. GLSL shader program
+        # 3. Harmonic Wave-Synthesis Shader Pipeline
         self.prog = self.ctx.program(
             vertex_shader="""
                 #version 330
 
-                in vec3 in_position;       // raw mesh vertex from terrain_gen
+                in vec3 in_position;       // Raw data arrays from terrain_gen
 
-                uniform mat4 mvp;          // model-view-projection matrix
-                uniform float vert_scale;  // vertical exaggeration multiplier
+                uniform mat4  mvp;          
+                uniform float wave_time;   // Continuous phase offset simulating car speed
 
-                out float v_height;  // scaled Y — drives colour in fragment shader
-                out vec3  v_pos;     // scaled world position — used for fog & normals
+                // Audio frequency modifiers
+                uniform float amp_bass;    
+                uniform float amp_mid;     
+                uniform float amp_treble;  
+
+                // Data normalization boundaries
+                uniform float min_x;
+                uniform float max_x;
+                uniform float min_z;
+                uniform float max_z;
+                uniform float highway_width;
+                uniform float base_height;
+
+                out float v_height;        // Drives the neon lighting gradients
+                out vec3  v_pos;           
 
                 void main() {
-                    vec3 pos = vec3(in_position.x,
-                                   in_position.y * vert_scale,
-                                   in_position.z);
+                    // Normalize the coordinates cleanly down to [-1.0, 1.0] bounding boxes
+                    float norm_x = -1.0 + 2.0 * ((in_position.x - min_x) / (max_x - min_x + 1e-6));
+                    float norm_z = -1.0 + 2.0 * ((in_position.z - min_z) / (max_z - min_z + 1e-6));
 
-                    gl_Position = mvp * vec4(pos, 1.0);
+                    // Isolate the central highway lane axis
+                    float distance_from_center = abs(norm_x);
+                    float mountain_ramp        = smoothstep(highway_width, 0.90, distance_from_center);
 
-                    v_height = pos.y;
-                    v_pos    = pos;
+                    // Procedural Wave Synthesis Layer (Directly replicates harmonics in image_ed6e44.png)
+                    // Wave 1: The deep fundamental low-frequency swell (Bass driven)
+                    float wave1 = sin(norm_z * 5.0 - wave_time * 2.0) * (1.0 + amp_bass * 1.5);
+
+                    // Wave 2: The secondary medium harmonic overlay ripples (Mid driven)
+                    float wave2 = sin(norm_z * 14.0 + wave_time * 4.5) * 0.30 * (1.0 + amp_mid * 2.0);
+
+                    // Wave 3: The high-frequency micro-vibrations across the crest ridges (Treble driven)
+                    float wave3 = cos(norm_x * 12.0) * sin(norm_z * 32.0 - wave_time * 7.0) * 0.08 * (1.0 + amp_treble * 2.5);
+
+                    // Composite all mathematical waves together into a unified mountain ridge structure
+                    float composite_wave = (wave1 + wave2 + wave3) * base_height;
+
+                    // Enforce the highway: Flatten the middle area completely, ramp up waves to the sides
+                    float final_height = composite_wave * mountain_ramp;
+
+                    // Reconstruct localized world coordinates
+                    vec3 localized_pos = vec3(norm_x * 2.0, final_height, norm_z * 2.8);
+
+                    gl_Position = mvp * vec4(localized_pos, 1.0);
+                    v_height    = final_height;
+                    v_pos       = localized_pos;
                 }
             """,
             fragment_shader="""
                 #version 330
 
-                in float v_height;   // scaled vertex height
-                in vec3  v_pos;      // world-space position
+                in float v_height;   
+                in vec3  v_pos;      
 
                 out vec4 fragColor;
 
-                uniform vec3  light_dir;   // world-space sun direction
-                uniform vec3  cam_pos;     // camera position (for specular)
-                uniform float ambient;     // minimum brightness in shadows
+                uniform vec3  light_dir;   
+                uniform vec3  cam_pos;     
+                uniform float ambient;     
 
-                uniform vec3 col_valley;   // colour at y ≈ 0  (lowest terrain)
-                uniform vec3 col_mid;      // colour at y ≈ 0.4
-                uniform vec3 col_peak;     // colour at y > 0.4 (highest peaks)
+                uniform vec3 col_highway;  
+                uniform vec3 col_wave_slope;     
+                uniform vec3 col_wave_crest;     
 
-                uniform vec3  fog_color;
+                uniform vec3  fog_color;   
                 uniform float fog_near;
                 uniform float fog_far;
 
                 void main() {
-                    // Flat shading normal from screen-space derivatives
+                    // Generate crisp low-poly geometric shading normal planes
                     vec3 normal = normalize(cross(dFdx(v_pos), dFdy(v_pos)));
 
-                    // Diffuse (Lambertian) lighting
+                    // Calculate basic diffuse directional illumination
                     vec3  L    = normalize(light_dir);
                     float diff = max(dot(normal, L), 0.0);
 
-                    // Specular (Phong) highlight
+                    // High specularity multiplier to make the waves look wet and metallic
                     vec3  V    = normalize(cam_pos - v_pos);
                     vec3  R    = reflect(-L, normal);
-                    float spec = pow(max(dot(V, R), 0.0), 32.0) * 0.4;
+                    float spec = pow(max(dot(V, R), 0.0), 32.0) * 0.50;
 
-                    float lighting = ambient + diff + spec;
+                    float lighting = ambient + (diff + spec) * 1.4;
 
-                    // Height-based colour gradient
+                    // Dynamic wave layer color mapping
                     vec3 color;
-                    if (v_height < 0.4) {
-                        float t = clamp(v_height * 2.5, 0.0, 1.0);
-                        color = mix(col_valley, col_mid, t);
+                    if (abs(v_height) < 0.02) {
+                        color = col_highway;  // Flat clean road asphalt
                     } else {
-                        float t = clamp((v_height - 0.4) * 1.6, 0.0, 1.0);
-                        color = mix(col_mid, col_peak, t);
+                        // Blend between mountain slopes and illuminated neon wave crests
+                        float t = clamp(abs(v_height) * 2.2, 0.0, 1.0);
+                        color = mix(col_wave_slope, col_wave_crest, t);
                     }
 
-                    vec3 lit = color * lighting * 1.2;
+                    vec3 lit = color * lighting;
 
-                    // Atmospheric depth fog
-                    float dist  = length(v_pos);
+                    // Apply depth fog boundary blending
+                    float dist  = length(v_pos - cam_pos);
                     float fog_t = clamp((dist - fog_near) / (fog_far - fog_near), 0.0, 1.0);
-                    vec3 final  = mix(lit, fog_color, fog_t);
+                    fog_t       = min(fog_t, 0.82); 
 
-                    fragColor = vec4(final, 1.0);
+                    vec3 final = mix(lit, fog_color, fog_t);
+                    fragColor  = vec4(final, 1.0);
                 }
             """,
         )
 
-        # 4. Vertex buffer (pre-allocated) & Index Buffer (static topology)
+        # 4. Generate index array layout map
         self.vbo = self.ctx.buffer(reserve=grid_size * grid_size * 12)
 
         indices = []
@@ -207,145 +180,164 @@ class TerrainRenderer:
             self.prog, [(self.vbo, "3f", "in_position")], self.ibo
         )
 
-        # 5. Static shader uniforms
-        self.prog["vert_scale"].value = self.VERT_SCALE
-        self.prog["light_dir"].value  = (1.5, 3.0, 1.0)
-        self.prog["fog_color"].value  = (0.01, 0.01, 0.02)
-        self.prog["fog_near"].value   = self.FOG_NEAR
-        self.prog["fog_far"].value    = self.FOG_FAR
-        self.prog["ambient"].value    = 0.32
+        # Set uniform constants
+        self.prog["fog_near"].value = self.FOG_NEAR
+        self.prog["fog_far"].value = self.FOG_FAR
+        self.prog["highway_width"].value = self.HIGHWAY_WIDTH
+        self.prog["base_height"].value = self.BASE_WAVE_HEIGHT
 
-        # Seeded RNG for reproducible beat shake offsets
-        self._rng = np.random.default_rng(seed=0)
-
-    def _compute_camera(self, progress: float, beat_pulse: float):
-        """
-        Implements the smooth 3-Act Cinematic Camera track with a percussive beat kick.
-        """
-        # --- Base Horizontal Orbit Position ---
-        # Slow continuous rotational angle over the course of the song
-        angle = progress * glm.pi() * 0.4
-
-        if progress <= 0.3:
-            # Act 1 (0% - 30%): Drone Reveal (High and far away, descending)
-            t = _smoothstep(0.0, 0.3, progress)
-            radius = _lerp(12.0, 8.5, t)
-            cam_y  = _lerp(6.0, 2.2, t)
-            look_at = glm.vec3(0.0, 0.2, 0.0)
-        elif progress <= 0.7:
-            # Act 2 (30% - 70%): Immersive low cruise
-            t = _smoothstep(0.3, 0.7, progress)
-            radius = 8.5
-            cam_y  = _lerp(2.2, 1.4, t)
-            # Look slightly forward towards the terrain horizon
-            look_at = glm.vec3(0.0, _lerp(0.2, 0.5, t), -0.5)
-        else:
-            # Act 3 (70% - 100%): Pull back grand ending reveal
-            t = _smoothstep(0.7, 1.0, progress)
-            radius = _lerp(8.5, 13.0, t)
-            cam_y  = _lerp(1.4, 5.0, t)
-            look_at = glm.vec3(0.0, _lerp(0.5, 0.0, t), 0.0)
-
-        # Calculate base structural position on an orbital cylinder arc
-        cam_x = radius * glm.sin(angle)
-        cam_z = radius * glm.cos(angle)
-
-        # --- Beat Camera Shake (Upward Impact) ---
-        if beat_pulse > 0.5 and self.SHAKE_INTENSITY > 0:
-            shake_y = abs(self._rng.uniform(0, self.SHAKE_INTENSITY))
-            shake_x = self._rng.uniform(-self.SHAKE_INTENSITY * 0.3, self.SHAKE_INTENSITY * 0.3)
-            shake_z = self._rng.uniform(-self.SHAKE_INTENSITY * 0.3, self.SHAKE_INTENSITY * 0.3)
-            cam_x += shake_x
-            cam_y += shake_y
-            cam_z += shake_z
-
-        return glm.vec3(cam_x, cam_y, cam_z), look_at
+        # Initialize global random tracking
+        self._rng = np.random.default_rng(seed=999)
 
     def render_frame(
-        self,
-        X_gpu,
-        Y_gpu,
-        Z_gpu,
-        frame_index:   int,
-        total_frames:  int   = 1,
-        band_energies: dict  = None,
-        beat_pulse:    float = 0.0,
-        frame_path:    str   = None,
+            self,
+            X_gpu,
+            Y_gpu,
+            Z_gpu,
+            frame_index: int,
+            total_frames: int = 1,
+            band_energies: dict = None,
+            beat_pulse: float = 0.0,
+            frame_path: str = None,
     ) -> Image.Image:
         if band_energies is None:
             band_energies = {"sub_bass": 0, "mid": 0, "treble": 0}
 
         progress = frame_index / max(total_frames, 1)
 
-        # ------------------------------------------------------------------
-        # AMD/NVIDIA Cross-Compatibility Layer
-        # ------------------------------------------------------------------
-        # If your teammate passes a CuPy array, .get() safely pulls it to CPU.
-        # On your AMD system, it detects standard NumPy arrays and passes safely.
+        # Safely capture arrays out of target device contexts
         X = X_gpu.get() if hasattr(X_gpu, "get") else X_gpu
         Y = Y_gpu.get() if hasattr(Y_gpu, "get") else Y_gpu
         Z = Z_gpu.get() if hasattr(Z_gpu, "get") else Z_gpu
 
-        # Stack into continuous interleaved binary data [x0,y0,z0, x1,y1,z1...]
         vertices = np.dstack((X, Y, Z)).astype(np.float32).tobytes()
         self.vbo.write(vertices)
 
-        # ------------------------------------------------------------------
-        # Camera & Matrix Math (PyGLM)
-        # ------------------------------------------------------------------
-        cam_pos, look_at = self._compute_camera(progress, beat_pulse)
+        # Update dynamic grid tracking boundaries
+        self.prog["min_x"].value = float(X.min())
+        self.prog["max_x"].value = float(X.max())
+        self.prog["min_z"].value = float(Z.min())
+        self.prog["max_z"].value = float(Z.max())
 
-        proj = glm.perspective(
-            glm.radians(self.FOV_DEGREES),
-            self.RENDER_WIDTH / self.RENDER_HEIGHT,
-            0.1, 50.0
-        )
-        view = glm.lookAt(cam_pos, look_at, glm.vec3(0.0, 1.0, 0.0))
+        # ------------------------------------------------------------------
+        # Audio Intensity Modifiers
+        # ------------------------------------------------------------------
+        sub_bass = float(band_energies.get("sub_bass", 0.0))
+        mid = float(band_energies.get("mid", 0.0))
+        treble = float(band_energies.get("treble", 0.0))
+
+        self.prog["amp_bass"].value = sub_bass
+        self.prog["amp_mid"].value = mid
+        self.prog["amp_treble"].value = treble
+
+        # Move the waves back along the Z-axis over time to simulate car speed
+        self.prog["wave_time"].value = progress * 60.0
+
+        # ------------------------------------------------------------------
+        # Storm State Machine Engine
+        # ------------------------------------------------------------------
+        is_lightning = (beat_pulse > 0.84 and self._rng.random() > 0.35) or (
+                    treble > 0.88 and self._rng.random() > 0.60)
+
+        if is_lightning:
+            ambient_brightness = self._rng.uniform(0.90, 1.30)
+            sky_fog_color = (0.65, 0.72, 0.92)  # Blinding lightning flash sky
+            self.prog["light_dir"].value = (self._rng.uniform(-3.0, 3.0), 6.0, self._rng.uniform(-3.0, 3.0))
+        else:
+            ambient_brightness = 0.30 + (mid * 0.15)
+            sky_fog_color = (0.01, 0.005, 0.02)  # Dark synthwave thunderstorm void
+            self.prog["light_dir"].value = (0.4, 3.0, -1.0)
+
+        self.prog["ambient"].value = ambient_brightness
+        self.prog["fog_color"].value = sky_fog_color
+
+        # ------------------------------------------------------------------
+        # Color Palettes (Sleek High-Contrast Wave Highway)
+        # ------------------------------------------------------------------
+        self.prog["col_highway"].value = (0.04, 0.04, 0.05)  # Pitch black asphalt floor center
+        self.prog["col_wave_slope"].value = (0.24, 0.02, 0.40)  # Rich purple deep wave valleys
+        self.prog["col_wave_crest"].value = (0.65 + mid * 0.25, 0.15,
+                                             0.98 + beat_pulse * 0.02)  # High-intensity glowing peaks
+
+        # ------------------------------------------------------------------
+        # Fixed Highway Center Cockpit Camera Tracking
+        # ------------------------------------------------------------------
+        t = progress * 40.0
+        vibration_x = np.sin(t * 85.0) * 0.0012
+        vibration_y = np.cos(t * 95.0) * 0.0008
+        chassis_drop = beat_pulse * -0.010
+
+        # Position camera dead-center down the lane looking forward
+        cam_x = 0.0 + vibration_x
+        cam_y = 0.18 + vibration_y + chassis_drop  # Positioned right over the highway floor
+        cam_z = 2.10  # Locked at the entry boundary looking forward
+
+        # Look straight down the negative Z-axis corridor towards the horizon
+        look_at = glm.vec3(0.0, 0.12, -2.5)
+
+        proj = glm.perspective(glm.radians(self.FOV_DEGREES), self.RENDER_WIDTH / self.RENDER_HEIGHT, 0.01, 10.0)
+        view = glm.lookAt(glm.vec3(cam_x, cam_y, cam_z), look_at, glm.vec3(0.0, 1.0, 0.0))
         mvp = proj * view
 
-        # Update dynamic camera uniform positions
-        self.prog["mvp"].write(bytes(mvp))
-        self.prog["cam_pos"].value = tuple(cam_pos)
+        self.prog["mvp"].write(np.array(mvp, dtype=np.float32).tobytes())
+        self.prog["cam_pos"].value = (cam_x, cam_y, cam_z)
 
         # ------------------------------------------------------------------
-        # Audio-Reactive Dynamic Color Palette Shifts
-        # ------------------------------------------------------------------
-        # Values base-map to rock aesthetics, scaling saturation/tone with audio bands
-        sub_bass = band_energies.get("sub_bass", 0.0)
-        mid      = band_energies.get("mid", 0.0)
-        treble   = band_energies.get("treble", 0.0)
-
-        # Valley shifts from deep indigo to electric purple on heavy bass
-        self.prog["col_valley"].value = (0.02 + sub_bass * 0.08, 0.01, 0.05 + sub_bass * 0.15)
-        # Mid-ranges pulse cyan/magenta with mid-frequency tracks
-        self.prog["col_mid"].value    = (0.4 + mid * 0.3, 0.05, 0.6 - mid * 0.2)
-        # Peaks glint bright white/neon gold on high treble transients or drum hits
-        self.prog["col_peak"].value   = (0.9, 0.8 + treble * 0.2, 0.5 + beat_pulse * 0.5)
-
-        # ------------------------------------------------------------------
-        # OpenGL Render Call
+        # Execute Scene Frame Render Pass
         # ------------------------------------------------------------------
         self.fbo.use()
-        self.ctx.clear(0.01, 0.01, 0.02, 1.0) # Matches background fog color
+        self.ctx.clear(sky_fog_color[0], sky_fog_color[1], sky_fog_color[2], 1.0)
         self.vao.render(moderngl.TRIANGLES)
 
-        # Extract raw color buffer to python memory image
         image_data = self.fbo.read(components=3)
         img = Image.frombytes("RGB", (self.RENDER_WIDTH, self.RENDER_HEIGHT), image_data)
 
         # ------------------------------------------------------------------
-        # Pure PIL Post-Process Multi-Pass Bloom
+        # 2D Procedural Lightning Vector Overlay
+        # ------------------------------------------------------------------
+        if is_lightning:
+            overlay_canvas = ImageDraw.Draw(img)
+
+            # Select lightning strike coordinates along sky boundaries
+            start_x = self._rng.uniform(self.RENDER_WIDTH * 0.30, self.RENDER_WIDTH * 0.70)
+            cur_x, cur_y = start_x, 0
+
+            bolt_points = [(cur_x, cur_y)]
+
+            # Form multi-segment zig-zag paths stretching toward the horizon
+            while cur_y < self.RENDER_HEIGHT * 0.42:
+                cur_y += self._rng.uniform(15, 30)
+                cur_x += self._rng.uniform(-35, 35)
+                bolt_points.append((cur_x, cur_y))
+
+            # Draw outer atmospheric glow layer
+            overlay_canvas.line(bolt_points, fill=(160, 215, 255), width=6)
+            # Draw intense white plasma core filament
+            overlay_canvas.line(bolt_points, fill=(255, 255, 255), width=2)
+
+            # Generate random secondary branches fork paths
+            if self._rng.random() > 0.45 and len(bolt_points) > 4:
+                branch_origin = bolt_points[len(bolt_points) // 2]
+                bx, by = branch_origin
+                branch_points = [(bx, by)]
+
+                for _ in range(3):
+                    by += self._rng.uniform(12, 24)
+                    bx += self._rng.uniform(-25, 25)
+                    branch_points.append((bx, by))
+
+                overlay_canvas.line(branch_points, fill=(130, 195, 255), width=3)
+                overlay_canvas.line(branch_points, fill=(255, 255, 255), width=1)
+
+        # ------------------------------------------------------------------
+        # Post-Process Glow Bloom Pipeline
         # ------------------------------------------------------------------
         if self.BLOOM_STRENGTH > 0:
-            # 1. Isolate bright pixels exceeding our threshold limits
             bright_pass = img.point(lambda p: p if p > self.BLOOM_THRESHOLD else 0)
-            # 2. Heavy blur layer to generate glow emissions
             blur_layer = bright_pass.filter(ImageFilter.GaussianBlur(radius=self.BLOOM_RADIUS))
-            # 3. Composite additive screen blend overlay back onto original render frame
             screen_blend = ImageChops.screen(img, blur_layer)
             img = Image.blend(img, screen_blend, self.BLOOM_STRENGTH)
 
-        # Optional synchronous file preservation fallback if called directly
         if frame_path:
             img.save(frame_path)
 
