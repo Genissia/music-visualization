@@ -39,8 +39,8 @@ Other changes in this file:
 
 import moderngl
 import numpy as np
-import glm
-from PIL import Image, ImageFilter
+from pyglm import glm
+from PIL import Image, ImageFilter, ImageChops
 
 
 # ---------------------------------------------------------------------------
@@ -50,8 +50,6 @@ from PIL import Image, ImageFilter
 def _smoothstep(edge0: float, edge1: float, x: float) -> float:
     """
     Hermite smooth-step: maps x from [edge0, edge1] → [0, 1] with ease-in/out.
-    Used everywhere we need a smooth blend between two states.
-    Returns 0 below edge0, 1 above edge1, smooth curve in between.
     """
     t = max(0.0, min(1.0, (x - edge0) / (edge1 - edge0 + 1e-9)))
     return t * t * (3.0 - 2.0 * t)
@@ -63,79 +61,36 @@ def _lerp(a: float, b: float, t: float) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Camera system
-# ---------------------------------------------------------------------------
-
-def _compute_camera(frame_index, total_frames, beat_pulse, rng, shake_intensity):
-    # Static camera
-    cam_pos = glm.vec3(0.0, 1.5, 9.5)
-    look_at = glm.vec3(0.0, 0.6, 0.0)
-
-    return cam_pos, look_at
-    # ------------------------------------------------------------------
-    # Beat camera shake — a short, sharp upward kick on every beat.
-    # We only shake the camera UP (never sideways or down) so it reads
-    # as a percussive impact rather than random noise.
-    # ------------------------------------------------------------------
-    if beat_pulse > 0.5:
-        # Upward-biased shake: feels like the bass is pushing the camera
-        shake_y = abs(rng.uniform(0, shake_intensity))
-        shake_x = rng.uniform(-shake_intensity * 0.3, shake_intensity * 0.3)
-        shake_z = rng.uniform(-shake_intensity * 0.3, shake_intensity * 0.3)
-        cam_x  += shake_x
-        cam_y  += shake_y
-        cam_z  += shake_z
-
-    cam_pos = glm.vec3(cam_x, cam_y, cam_z)
-    return cam_pos, look_at
-
-
-# ---------------------------------------------------------------------------
 # Main renderer class
 # ---------------------------------------------------------------------------
 
 class TerrainRenderer:
     """
     Renders 3-D terrain meshes to PNG images using off-screen OpenGL.
-
-    Usage
-    -----
-    renderer = TerrainRenderer(grid_size=150)
-    img = renderer.render_frame(X, Y, Z, frame_index=i, total_frames=N,
-                                band_energies=bands, beat_pulse=beat,
-                                frame_path="out/frame_000001.png")
+    Fully compatible with both CuPy (NVIDIA CUDA) and NumPy (AMD/Intel CPU) inputs.
     """
 
     # ------------------------------------------------------------------
-    # TWEAK PANEL — safe to change these numbers without reading the rest
+    # TWEAK PANEL
     # ------------------------------------------------------------------
-    
-    
-    #RENDER_WIDTH    = 1920
-    #RENDER_HEIGHT   = 1080
-
     RENDER_WIDTH    = 720
     RENDER_HEIGHT   = 720
 
-
     # How much the Y values from terrain_gen are exaggerated vertically.
-    # Raised from 0.035 to 0.055 so ridges are clearly visible from distance.
     VERT_SCALE      = 0.040
 
-    # Field of view in degrees.  Wider (60°) shows more terrain than the
-    # original 45° — better for a landscape visualizer.
-    FOV_DEGREES = 45.0
+    # Field of view in degrees.
+    FOV_DEGREES     = 45.0
 
     # Beat camera shake — how many world-units the camera jolts on a beat
-    SHAKE_INTENSITY = 0.0
+    SHAKE_INTENSITY = 0.15
 
     # Fog — terrain beyond FOG_FAR fades to the background colour.
-    # Pushed out far so the full terrain width is always visible.
     FOG_NEAR        = 5.0
     FOG_FAR         = 18.0
 
     # Bloom post-process
-    BLOOM_THRESHOLD = 200    # pixel brightness (0–255) above which glow applies
+    BLOOM_THRESHOLD = 180    # pixel brightness (0–255) above which glow applies
     BLOOM_RADIUS    = 12     # Gaussian blur radius for the glow halo
     BLOOM_STRENGTH  = 0.45   # additive blend factor (0 = no bloom, 1 = full)
     # ------------------------------------------------------------------
@@ -144,26 +99,17 @@ class TerrainRenderer:
         self.grid_size = grid_size
         w, h = self.RENDER_WIDTH, self.RENDER_HEIGHT
 
-        # ------------------------------------------------------------------
         # 1. Headless OpenGL context
-        # DEPTH_TEST ensures closer triangles occlude farther ones correctly.
-        # ------------------------------------------------------------------
         self.ctx = moderngl.create_standalone_context()
         self.ctx.enable(moderngl.DEPTH_TEST)
 
-        # ------------------------------------------------------------------
         # 2. Off-screen framebuffer
-        # We render into a texture (not a window) and read the pixels back
-        # to save as a PNG.  The depth renderbuffer is required for DEPTH_TEST.
-        # ------------------------------------------------------------------
         self.fbo = self.ctx.framebuffer(
             color_attachments=[self.ctx.texture((w, h), 4)],
             depth_attachment=self.ctx.depth_renderbuffer((w, h)),
         )
 
-        # ------------------------------------------------------------------
         # 3. GLSL shader program
-        # ------------------------------------------------------------------
         self.prog = self.ctx.program(
             vertex_shader="""
                 #version 330
@@ -177,15 +123,12 @@ class TerrainRenderer:
                 out vec3  v_pos;     // scaled world position — used for fog & normals
 
                 void main() {
-                    // Scale the Y (height) axis so peaks are clearly visible.
-                    // X and Z stay at terrain_gen's -1..+1 range.
                     vec3 pos = vec3(in_position.x,
                                    in_position.y * vert_scale,
                                    in_position.z);
 
                     gl_Position = mvp * vec4(pos, 1.0);
 
-                    // Pass to fragment shader
                     v_height = pos.y;
                     v_pos    = pos;
                 }
@@ -198,42 +141,34 @@ class TerrainRenderer:
 
                 out vec4 fragColor;
 
-                // ---- lighting uniforms ----
                 uniform vec3  light_dir;   // world-space sun direction
                 uniform vec3  cam_pos;     // camera position (for specular)
                 uniform float ambient;     // minimum brightness in shadows
 
-                // ---- colour palette (animated each frame from CPU) ----
                 uniform vec3 col_valley;   // colour at y ≈ 0  (lowest terrain)
                 uniform vec3 col_mid;      // colour at y ≈ 0.4
                 uniform vec3 col_peak;     // colour at y > 0.4 (highest peaks)
 
-                // ---- fog uniforms ----
                 uniform vec3  fog_color;
                 uniform float fog_near;
                 uniform float fog_far;
 
                 void main() {
-                    // ---- Flat shading normal from screen-space derivatives ----
-                    // dFdx/dFdy give us how the position changes between adjacent
-                    // pixels.  Their cross product points perpendicular to the face.
+                    // Flat shading normal from screen-space derivatives
                     vec3 normal = normalize(cross(dFdx(v_pos), dFdy(v_pos)));
 
-                    // ---- Diffuse (Lambertian) lighting ----
+                    // Diffuse (Lambertian) lighting
                     vec3  L    = normalize(light_dir);
                     float diff = max(dot(normal, L), 0.0);
 
-                    // ---- Specular (Phong) highlight ----
-                    // Makes tall peaks catch the light with a bright glint.
+                    // Specular (Phong) highlight
                     vec3  V    = normalize(cam_pos - v_pos);
                     vec3  R    = reflect(-L, normal);
                     float spec = pow(max(dot(V, R), 0.0), 32.0) * 0.4;
 
                     float lighting = ambient + diff + spec;
 
-                    // ---- Height-based colour gradient ----
-                    // valley_color → mid_color between y=0 and y=0.4
-                    // mid_color    → peak_color  above y=0.4
+                    // Height-based colour gradient
                     vec3 color;
                     if (v_height < 0.4) {
                         float t = clamp(v_height * 2.5, 0.0, 1.0);
@@ -245,13 +180,9 @@ class TerrainRenderer:
 
                     vec3 lit = color * lighting * 1.2;
 
-                    // ---- Atmospheric depth fog ----
-                    // Linearly blend lit colour toward fog_color with distance.
-                    // This softens the far edge of the terrain so it doesn't
-                    // look like it just "cuts off".
+                    // Atmospheric depth fog
                     float dist  = length(v_pos);
-                    float fog_t = clamp((dist - fog_near) / (fog_far - fog_near),
-                                        0.0, 1.0);
+                    float fog_t = clamp((dist - fog_near) / (fog_far - fog_near), 0.0, 1.0);
                     vec3 final  = mix(lit, fog_color, fog_t);
 
                     fragColor = vec4(final, 1.0);
@@ -259,54 +190,76 @@ class TerrainRenderer:
             """,
         )
 
-        # ------------------------------------------------------------------
-        # 4. Vertex buffer (pre-allocated, overwritten every frame)
-        #    Index buffer (built once — mesh topology never changes)
-        # ------------------------------------------------------------------
-        # Reserve enough bytes for grid_size² vertices × 3 floats × 4 bytes
+        # 4. Vertex buffer (pre-allocated) & Index Buffer (static topology)
         self.vbo = self.ctx.buffer(reserve=grid_size * grid_size * 12)
 
-        # Triangulate the quad grid.  Each quad → 2 triangles → 6 indices.
         indices = []
         for i in range(grid_size - 1):
             for j in range(grid_size - 1):
-                tl = i * grid_size + j        # top-left vertex index
-                tr = tl + 1                   # top-right
-                bl = (i + 1) * grid_size + j  # bottom-left
-                br = bl + 1                   # bottom-right
-                # Two triangles per quad (counter-clockwise winding)
-                indices.extend([tl, bl, tr,   # triangle 1
-                                 tr, bl, br])  # triangle 2
+                tl = i * grid_size + j
+                tr = tl + 1
+                bl = (i + 1) * grid_size + j
+                br = bl + 1
+                indices.extend([tl, bl, tr, tr, bl, br])
 
         self.ibo = self.ctx.buffer(np.array(indices, dtype="i4").tobytes())
         self.vao = self.ctx.vertex_array(
             self.prog, [(self.vbo, "3f", "in_position")], self.ibo
         )
 
-        # ------------------------------------------------------------------
-        # 5. Static shader uniforms (values that never change per frame)
-        # ------------------------------------------------------------------
+        # 5. Static shader uniforms
         self.prog["vert_scale"].value = self.VERT_SCALE
-
-        # Sun is upper-right-front — creates a clear shadow on the far slopes
-        # so depth is readable even without fog.
         self.prog["light_dir"].value  = (1.5, 3.0, 1.0)
-
-        # Fog colour should match the clear colour exactly so the fade is seamless
         self.prog["fog_color"].value  = (0.01, 0.01, 0.02)
         self.prog["fog_near"].value   = self.FOG_NEAR
         self.prog["fog_far"].value    = self.FOG_FAR
-
-        # Ambient raised slightly from v1 (0.28→0.32) so valley details don't
-        # get completely lost in shadow when the camera is low.
         self.prog["ambient"].value    = 0.32
 
         # Seeded RNG for reproducible beat shake offsets
         self._rng = np.random.default_rng(seed=0)
 
-    # ------------------------------------------------------------------
-    # Per-frame render entry point
-    # ------------------------------------------------------------------
+    def _compute_camera(self, progress: float, beat_pulse: float):
+        """
+        Implements the smooth 3-Act Cinematic Camera track with a percussive beat kick.
+        """
+        # --- Base Horizontal Orbit Position ---
+        # Slow continuous rotational angle over the course of the song
+        angle = progress * glm.pi() * 0.4
+
+        if progress <= 0.3:
+            # Act 1 (0% - 30%): Drone Reveal (High and far away, descending)
+            t = _smoothstep(0.0, 0.3, progress)
+            radius = _lerp(12.0, 8.5, t)
+            cam_y  = _lerp(6.0, 2.2, t)
+            look_at = glm.vec3(0.0, 0.2, 0.0)
+        elif progress <= 0.7:
+            # Act 2 (30% - 70%): Immersive low cruise
+            t = _smoothstep(0.3, 0.7, progress)
+            radius = 8.5
+            cam_y  = _lerp(2.2, 1.4, t)
+            # Look slightly forward towards the terrain horizon
+            look_at = glm.vec3(0.0, _lerp(0.2, 0.5, t), -0.5)
+        else:
+            # Act 3 (70% - 100%): Pull back grand ending reveal
+            t = _smoothstep(0.7, 1.0, progress)
+            radius = _lerp(8.5, 13.0, t)
+            cam_y  = _lerp(1.4, 5.0, t)
+            look_at = glm.vec3(0.0, _lerp(0.5, 0.0, t), 0.0)
+
+        # Calculate base structural position on an orbital cylinder arc
+        cam_x = radius * glm.sin(angle)
+        cam_z = radius * glm.cos(angle)
+
+        # --- Beat Camera Shake (Upward Impact) ---
+        if beat_pulse > 0.5 and self.SHAKE_INTENSITY > 0:
+            shake_y = abs(self._rng.uniform(0, self.SHAKE_INTENSITY))
+            shake_x = self._rng.uniform(-self.SHAKE_INTENSITY * 0.3, self.SHAKE_INTENSITY * 0.3)
+            shake_z = self._rng.uniform(-self.SHAKE_INTENSITY * 0.3, self.SHAKE_INTENSITY * 0.3)
+            cam_x += shake_x
+            cam_y += shake_y
+            cam_z += shake_z
+
+        return glm.vec3(cam_x, cam_y, cam_z), look_at
 
     def render_frame(
         self,
@@ -319,143 +272,81 @@ class TerrainRenderer:
         beat_pulse:    float = 0.0,
         frame_path:    str   = None,
     ) -> Image.Image:
-        """
-        Render a single frame of terrain to a PIL Image.
-
-        Parameters
-        ----------
-        X_gpu, Y_gpu, Z_gpu : cp.ndarray, shape (grid_size, grid_size)
-            Mesh vertex positions from terrain_gen (on the GPU).
-        frame_index   : Current frame number (drives camera & palette).
-        total_frames  : Total frame count (used to compute progress 0→1).
-        band_energies : Dict of per-band scalar energies for colour animation.
-        beat_pulse    : 1.0 on a beat frame, 0.0 otherwise (camera shake).
-        frame_path    : If given, the PNG is saved to this path.
-
-        Returns
-        -------
-        PIL.Image.Image (RGB, RENDER_WIDTH × RENDER_HEIGHT)
-        """
         if band_energies is None:
-            band_energies = {}
+            band_energies = {"sub_bass": 0, "mid": 0, "treble": 0}
 
-        progress = frame_index / max(total_frames, 1)  # 0.0 → 1.0
+        progress = frame_index / max(total_frames, 1)
 
         # ------------------------------------------------------------------
-        # A. Compute camera position and target via the three-act system
+        # AMD/NVIDIA Cross-Compatibility Layer
         # ------------------------------------------------------------------
-        cam_pos, look_at = _compute_camera(
-            frame_index, total_frames, beat_pulse, self._rng, self.SHAKE_INTENSITY
-        )
+        # If your teammate passes a CuPy array, .get() safely pulls it to CPU.
+        # On your AMD system, it detects standard NumPy arrays and passes safely.
+        X = X_gpu.get() if hasattr(X_gpu, "get") else X_gpu
+        Y = Y_gpu.get() if hasattr(Y_gpu, "get") else Y_gpu
+        Z = Z_gpu.get() if hasattr(Z_gpu, "get") else Z_gpu
 
-        # Upload camera position to the shader (needed for specular calculation)
-        self.prog["cam_pos"].value = (cam_pos.x, cam_pos.y, cam_pos.z)
+        # Stack into continuous interleaved binary data [x0,y0,z0, x1,y1,z1...]
+        vertices = np.dstack((X, Y, Z)).astype(np.float32).tobytes()
+        self.vbo.write(vertices)
 
-        # Build the view matrix (camera transform) and projection matrix
-        view = glm.lookAt(cam_pos, look_at, glm.vec3(0, 1, 0))
+        # ------------------------------------------------------------------
+        # Camera & Matrix Math (PyGLM)
+        # ------------------------------------------------------------------
+        cam_pos, look_at = self._compute_camera(progress, beat_pulse)
+
         proj = glm.perspective(
             glm.radians(self.FOV_DEGREES),
             self.RENDER_WIDTH / self.RENDER_HEIGHT,
-            0.1,    # near clip plane
-            100.0,  # far clip plane
+            0.1, 50.0
         )
-        # Combined MVP = Projection × View  (no separate model transform;
-        # terrain_gen already centres the mesh at the origin)
+        view = glm.lookAt(cam_pos, look_at, glm.vec3(0.0, 1.0, 0.0))
         mvp = proj * view
-        self.prog["mvp"].write(np.array(mvp, dtype="f4").tobytes())
+
+        # Update dynamic camera uniform positions
+        self.prog["mvp"].write(bytes(mvp))
+        self.prog["cam_pos"].value = tuple(cam_pos)
 
         # ------------------------------------------------------------------
-        # B. Animate colour palette based on song progress
-        #
-        # Three-act palette to match the camera:
-        #   Act 1 (cool blue)  → Act 2 (vivid purple/teal) → Act 3 (warm gold)
-        # This gives the video a visual narrative arc beyond just moving terrain.
+        # Audio-Reactive Dynamic Color Palette Shifts
         # ------------------------------------------------------------------
-        t_warm = _smoothstep(0.35, 0.65, progress)  # 0=cool, 1=warm
+        # Values base-map to rock aesthetics, scaling saturation/tone with audio bands
+        sub_bass = band_energies.get("sub_bass", 0.0)
+        mid      = band_energies.get("mid", 0.0)
+        treble   = band_energies.get("treble", 0.0)
 
-        cool_valley = np.array([0.05, 0.05, 0.25])   # deep navy
-        cool_mid    = np.array([0.30, 0.60, 0.80])   # bright teal (more readable from far)
-        cool_peak   = np.array([0.90, 0.95, 1.00])   # near-white ice
-
-        warm_valley = np.array([0.15, 0.02, 0.02])   # dark crimson
-        warm_mid    = np.array([0.80, 0.40, 0.05])   # orange
-        warm_peak   = np.array([1.00, 0.95, 0.30])   # bright gold
-
-        valley = cool_valley * (1 - t_warm) + warm_valley * t_warm
-        mid    = cool_mid    * (1 - t_warm) + warm_mid    * t_warm
-        peak   = cool_peak   * (1 - t_warm) + warm_peak   * t_warm
-
-        # Louder mid-range audio nudges the peak colour toward white —
-        # loud drops feel more intense because the peaks "blow out"
-        mid_energy = band_energies.get("mid", 0.0)
-        peak = peak + (1.0 - peak) * mid_energy * 0.25
-
-        self.prog["col_valley"].value = tuple(valley.clip(0, 1))
-        self.prog["col_mid"].value    = tuple(mid.clip(0, 1))
-        self.prog["col_peak"].value   = tuple(peak.clip(0, 1))
+        # Valley shifts from deep indigo to electric purple on heavy bass
+        self.prog["col_valley"].value = (0.02 + sub_bass * 0.08, 0.01, 0.05 + sub_bass * 0.15)
+        # Mid-ranges pulse cyan/magenta with mid-frequency tracks
+        self.prog["col_mid"].value    = (0.4 + mid * 0.3, 0.05, 0.6 - mid * 0.2)
+        # Peaks glint bright white/neon gold on high treble transients or drum hits
+        self.prog["col_peak"].value   = (0.9, 0.8 + treble * 0.2, 0.5 + beat_pulse * 0.5)
 
         # ------------------------------------------------------------------
-        # C. Draw the terrain mesh
+        # OpenGL Render Call
         # ------------------------------------------------------------------
         self.fbo.use()
-        # Clear to near-black so the fog colour blends correctly at the edges
-        self.fbo.clear(0.01, 0.01, 0.02, 1.0)
-
-        # Copy vertex data from GPU (CuPy) → CPU → ModernGL buffer
-        # This is the one unavoidable GPU→CPU transfer per frame.
-        X = X_gpu.get()
-        Y = Y_gpu.get()
-        Z = Z_gpu.get()
-        vertices = np.stack([X, Y, Z], axis=-1).astype("f4").tobytes()
-        self.vbo.write(vertices)
-
-        # Issue the draw call — renders all triangles in the index buffer
+        self.ctx.clear(0.01, 0.01, 0.02, 1.0) # Matches background fog color
         self.vao.render(moderngl.TRIANGLES)
 
-        # ------------------------------------------------------------------
-        # D. Read pixels from framebuffer → PIL Image
-        # OpenGL stores pixels bottom-row-first; we flip vertically to fix it.
-        # ------------------------------------------------------------------
-        raw = self.fbo.color_attachments[0].read()
-        img = Image.frombytes("RGBA", (self.RENDER_WIDTH, self.RENDER_HEIGHT), raw)
-        img = img.convert("RGB").transpose(Image.FLIP_TOP_BOTTOM)
+        # Extract raw color buffer to python memory image
+        image_data = self.fbo.read(components=3)
+        img = Image.frombytes("RGB", (self.RENDER_WIDTH, self.RENDER_HEIGHT), image_data)
 
         # ------------------------------------------------------------------
-        # E. Post-process: bloom glow on bright pixels
+        # Pure PIL Post-Process Multi-Pass Bloom
         # ------------------------------------------------------------------
-        img = self._apply_bloom(img)
+        if self.BLOOM_STRENGTH > 0:
+            # 1. Isolate bright pixels exceeding our threshold limits
+            bright_pass = img.point(lambda p: p if p > self.BLOOM_THRESHOLD else 0)
+            # 2. Heavy blur layer to generate glow emissions
+            blur_layer = bright_pass.filter(ImageFilter.GaussianBlur(radius=self.BLOOM_RADIUS))
+            # 3. Composite additive screen blend overlay back onto original render frame
+            screen_blend = ImageChops.screen(img, blur_layer)
+            img = Image.blend(img, screen_blend, self.BLOOM_STRENGTH)
 
-        # ------------------------------------------------------------------
-        # F. Optional save to disk
-        # ------------------------------------------------------------------
+        # Optional synchronous file preservation fallback if called directly
         if frame_path:
             img.save(frame_path)
 
         return img
-
-    # ------------------------------------------------------------------
-    # Post-processing
-    # ------------------------------------------------------------------
-
-    def _apply_bloom(self, img: Image.Image) -> Image.Image:
-        """
-        Bloom glow effect:
-          1. Extract pixels brighter than BLOOM_THRESHOLD.
-          2. Blur them with a wide Gaussian (simulates lens scatter).
-          3. Add the blurred glow additively back onto the original image.
-        The result makes bright terrain peaks appear to emit light.
-        """
-        arr = np.array(img, dtype=np.float32)
-
-        # Keep only the bright pixels (per-pixel max across RGB channels)
-        bright_mask  = arr.max(axis=2, keepdims=True) > self.BLOOM_THRESHOLD
-        bright_layer = arr * bright_mask
-
-        # Blur the isolated bright pixels
-        bright_img  = Image.fromarray(np.clip(bright_layer, 0, 255).astype(np.uint8))
-        blurred     = bright_img.filter(ImageFilter.GaussianBlur(radius=self.BLOOM_RADIUS))
-        blurred_arr = np.array(blurred, dtype=np.float32)
-
-        # Additive composite: original + (glow × strength)
-        bloomed = np.clip(arr + blurred_arr * self.BLOOM_STRENGTH, 0, 255).astype(np.uint8)
-        return Image.fromarray(bloomed)

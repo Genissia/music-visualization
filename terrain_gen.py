@@ -20,6 +20,23 @@ import numpy as np
 import cupy as cp
 import time
 
+try:
+    import cupy as cp
+
+    # Force an immediate hardware check.
+    # If you have an AMD card or missing drivers, this will trigger the error now
+    _device_count = cp.cuda.runtime.getDeviceCount()
+    if _device_count == 0:
+        raise RuntimeError("No CUDA devices available.")
+
+    print("[terrain] Using NVIDIA CUDA acceleration (CuPy).")
+
+except Exception:
+    # If cupy isn't installed, OR if it throws a driver/hardware error,
+    # we completely fall back to standard CPU NumPy.
+    import numpy as cp
+
+    print("[terrain] AMD/Intel card detected or CUDA missing. Falling back to CPU acceleration (NumPy).")
 # ---------------------------------------------------------------------------
 # Module-level globals
 # ---------------------------------------------------------------------------
