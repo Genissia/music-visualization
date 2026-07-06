@@ -1,14 +1,3 @@
-"""
-terrain_gen.py
---------------
-GPU-accelerated 3D terrain generation driven by audio analysis.
-
-Updated for "Ultra-Smooth Wide Diorama":
-  - smooth_alpha dropped to 0.08 for extremely slow, heavy fluid dynamics.
-  - Base amplitude lowered slightly to prevent audio spikes from exploding 
-    out of the camera frame.
-"""
-
 import numpy as np
 import cupy as cp
 import time
