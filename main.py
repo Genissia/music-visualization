@@ -149,7 +149,7 @@ def generate_video(
         print(f"  Total render time: {total_render_time:.1f}s ({num_frames / total_render_time:.1f} fps average)")
     else:
         print(f"\n  ✗ FFmpeg compilation failed. Verify your source audio file formats or encoder path variables.")
-
+#trying smth
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Music Landscape Visualizer")
