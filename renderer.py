@@ -151,12 +151,12 @@ class TerrainRenderer:
 
                     // HEIGHT COLORS
                     vec3 color;
-                    if (v_height < 0.4) {
-                        float t = clamp(v_height * 2.5, 0.0, 1.0);
-                        color = mix(col_valley, col_mid, t);
+                    if (abs(v_height) < 0.02) {
+                        color = col_highway;  // Flat clean road asphalt
                     } else {
-                        float t = clamp((v_height - 0.4) * 1.6, 0.0, 1.0);
-                        color = mix(col_mid, col_peak, t);
+                        // Blend between mountain slopes and illuminated neon wave crests
+                        float t = clamp(abs(v_height) * 2.2, 0.0, 1.0);
+                        color = mix(col_wave_slope, col_wave_crest, t);
                     }
 
                     // MATERIAL PASS (SOLID CORE vs GLOWING NEON)
@@ -172,7 +172,8 @@ class TerrainRenderer:
                     float fog_t = clamp((dist - fog_near) / (fog_far - fog_near), 0.0, 1.0);
                     vec3 final  = mix(lit, fog_color, fog_t);
 
-                    fragColor = vec4(final, 1.0);
+                    vec3 final = mix(lit, fog_color, fog_t);
+                    fragColor  = vec4(final, 1.0);
                 }
             """,
         )
@@ -241,16 +242,14 @@ class TerrainRenderer:
         warm_mid    = np.array([0.95, 0.30, 0.05]) 
         warm_peak   = np.array([1.00, 0.90, 0.40])
 
-        valley = cool_valley * (1 - t_warm) + warm_valley * t_warm
-        mid    = cool_mid    * (1 - t_warm) + warm_mid    * t_warm
-        peak   = cool_peak   * (1 - t_warm) + warm_peak   * t_warm
+        # Look straight down the negative Z-axis corridor towards the horizon
+        look_at = glm.vec3(0.0, 0.12, -2.5)
 
         mid_energy = band_energies.get("mid", 0.0)
         peak = peak + (1.0 - peak) * mid_energy * 0.35
 
-        self.prog["col_valley"].value = tuple(valley.clip(0, 1))
-        self.prog["col_mid"].value    = tuple(mid.clip(0, 1))
-        self.prog["col_peak"].value   = tuple(peak.clip(0, 1))
+        self.prog["mvp"].write(np.array(mvp, dtype=np.float32).tobytes())
+        self.prog["cam_pos"].value = (cam_x, cam_y, cam_z)
 
         self.fbo.use()
         bg = (0.01, 0.01, 0.015) 

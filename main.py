@@ -3,20 +3,15 @@ Entry point and pipeline orchestrator for the Music Landscape Visualizer.
 """
 
 import os
-import shutil
 import subprocess
 import time
 import argparse
-from concurrent.futures import ThreadPoolExecutor
-from io import BytesIO
 
 import numpy as np
-from PIL import Image
 
 from audio_process import extract_audio_frames
-from terrain_gen   import create_terrain_frame
-from renderer      import TerrainRenderer
-
+from terrain_gen import create_terrain_frame
+from renderer import TerrainRenderer
 
 def _progress_bar(current: int, total: int, bar_width: int = 30) -> str:
     """Return progress bar string using standard ASCII characters."""
@@ -27,11 +22,10 @@ def _progress_bar(current: int, total: int, bar_width: int = 30) -> str:
 
 
 def generate_video(
-    audio_path:   str,
-    output_video: str = "output.mp4",
-    fps:          int = 60,
-    grid_size:    int = 150,
-    workers:      int = 4,
+        audio_path: str,
+        output_video: str = "output.mp4",
+        fps: int = 60,
+        grid_size: int = 150,
 ):
     """
     Execute the visualization pipeline: audio extraction, terrain generation,
@@ -67,7 +61,6 @@ def generate_video(
 
     print(f"\n  Frames  : {num_frames}")
     print(f"  Duration: {num_frames / fps:.1f}s  at {fps} FPS")
-    print(f"  Beats   : {int(beat_frames.sum())}")
 
     print("\n" + "=" * 60)
     print("STEP 2 / 4  -  Renderer Initialisation")
@@ -94,6 +87,9 @@ def generate_video(
 
     futures = []  # Tracks asynchronous image write tasks
 
+    # ------------------------------------------------------------------
+    # Core In-Memory Stream Loop
+    # ------------------------------------------------------------------
     for i in range(num_frames):
         # Extract audio features for the current frame
         frame_spec   = spectrogram[i]
@@ -102,11 +98,11 @@ def generate_video(
 
         # Generate terrain mesh on the GPU
         X, Y, Z = create_terrain_frame(
-            audio_frame   = frame_spec,
-            band_energies = frame_bands,
-            beat_pulse    = frame_beat,
-            grid_size     = grid_size,
-            frame_index   = i,
+            audio_frame=frame_spec,
+            band_energies=frame_bands,
+            beat_pulse=frame_beat,
+            grid_size=grid_size,
+            frame_index=i,
         )
 
         # Render 3D frame using ModernGL
@@ -218,13 +214,11 @@ if __name__ == "__main__":
 
     if not os.path.exists(args.audio):
         print(f"Error: audio file '{args.audio}' not found.")
-        print("Usage: python main.py <path_to_audio.mp3>")
         raise SystemExit(1)
 
     generate_video(
-        audio_path   = args.audio,
-        output_video = args.output,
-        fps          = args.fps,
-        grid_size    = args.grid,
-        workers      = args.workers,
+        audio_path=args.audio,
+        output_video=args.output,
+        fps=args.fps,
+        grid_size=args.grid,
     )
