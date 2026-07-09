@@ -154,7 +154,7 @@ def generate_video(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Music Landscape Visualizer")
     parser.add_argument("audio", nargs="?", default="acdc_Thunderstruck.mp3")
-    parser.add_argument("-o", "--output", default="visual_landscape.mp4")
+    parser.add_argument("-o", "--output", default="visual_landscape2.mp4")
     parser.add_argument("--fps", type=int, default=60)
     parser.add_argument("--grid", type=int, default=150)
     args = parser.parse_args()

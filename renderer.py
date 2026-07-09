@@ -102,7 +102,7 @@ class TerrainRenderer:
                     // FIXED threshold: 0.015 instead of 0.04
                     // Only truly flat road geometry gets road color —
                     // wall bases no longer bleed into road color
-                    if (v_height < 0.015) {
+                    if (v_height < 0.008) {
 
                         color = col_road;
 
@@ -118,11 +118,7 @@ class TerrainRenderer:
                             }
                         }
 
-                        // Faint shoulder lines
-                        bool on_shoulder = abs(abs(v_pos.x) - 0.95) < 0.04;
-                        if (on_shoulder) {
-                            color = col_line * 0.4;
-                        }
+                        // Shoulder lines removed — were bleeding onto wall bases
 
                     } else {
                         // Mountain wall gradient

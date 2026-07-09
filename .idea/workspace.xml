@@ -4,7 +4,7 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="d46ed2bd-e020-4c22-887a-dbd93a4f2b3f" name="Changes" comment="positioning the mountains">
+    <list default="true" id="d46ed2bd-e020-4c22-887a-dbd93a4f2b3f" name="Changes" comment="fixing bleeding">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/main.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/renderer.py" beforeDir="false" afterPath="$PROJECT_DIR$/renderer.py" afterDir="false" />
@@ -168,7 +168,15 @@
       <option name="project" value="LOCAL" />
       <updated>1783549219013</updated>
     </task>
-    <option name="localTasksCounter" value="8" />
+    <task id="LOCAL-00008" summary="fixing bleeding">
+      <option name="closed" value="true" />
+      <created>1783597330446</created>
+      <option name="number" value="00008" />
+      <option name="presentableId" value="LOCAL-00008" />
+      <option name="project" value="LOCAL" />
+      <updated>1783597330446</updated>
+    </task>
+    <option name="localTasksCounter" value="9" />
     <servers />
   </component>
   <component name="Vcs.Log.Tabs.Properties">
@@ -190,6 +198,7 @@
     <MESSAGE value="new video works" />
     <MESSAGE value="is it working" />
     <MESSAGE value="positioning the mountains" />
-    <option name="LAST_COMMIT_MESSAGE" value="positioning the mountains" />
+    <MESSAGE value="fixing bleeding" />
+    <option name="LAST_COMMIT_MESSAGE" value="fixing bleeding" />
   </component>
 </project>
