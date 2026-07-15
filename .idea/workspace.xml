@@ -4,10 +4,13 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="d46ed2bd-e020-4c22-887a-dbd93a4f2b3f" name="Changes" comment="is it working">
+    <list default="true" id="d46ed2bd-e020-4c22-887a-dbd93a4f2b3f" name="Changes" comment="fixing bleeding2">
+      <change beforePath="$PROJECT_DIR$/.idea/music-visualization.iml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/music-visualization.iml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/audio_process.py" beforeDir="false" afterPath="$PROJECT_DIR$/audio_process.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/main.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/renderer.py" beforeDir="false" afterPath="$PROJECT_DIR$/renderer.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/terrain_gen.py" beforeDir="false" afterPath="$PROJECT_DIR$/terrain_gen.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -37,7 +40,7 @@
     </favorite-branches>
     <option name="RECENT_BRANCH_BY_REPOSITORY">
       <map>
-        <entry key="$PROJECT_DIR$" value="gp" />
+        <entry key="$PROJECT_DIR$" value="main" />
       </map>
     </option>
     <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
@@ -77,21 +80,21 @@
     <option name="hideEmptyMiddlePackages" value="true" />
     <option name="showLibraryContents" value="true" />
   </component>
-  <component name="PropertiesComponent"><![CDATA[{
-  "keyToString": {
-    "ModuleVcsDetector.initialDetectionPerformed": "true",
-    "Python.analyzer.executor": "Run",
-    "Python.main.executor": "Run",
-    "Python.renderer.executor": "Run",
-    "RunOnceActivity.ShowReadmeOnStart": "true",
-    "RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252": "true",
-    "RunOnceActivity.git.unshallow": "true",
-    "git-widget-placeholder": "Genny2",
-    "ignore.virus.scanning.warn.message": "true",
-    "last_opened_file_path": "C:/Users/genis/Documents/GitHub/music-visualization",
-    "settings.editor.selected.configurable": "preferences.fileTypes"
+  <component name="PropertiesComponent">{
+  &quot;keyToString&quot;: {
+    &quot;ModuleVcsDetector.initialDetectionPerformed&quot;: &quot;true&quot;,
+    &quot;Python.analyzer.executor&quot;: &quot;Run&quot;,
+    &quot;Python.main.executor&quot;: &quot;Run&quot;,
+    &quot;Python.renderer.executor&quot;: &quot;Run&quot;,
+    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,
+    &quot;git-widget-placeholder&quot;: &quot;Genny2&quot;,
+    &quot;ignore.virus.scanning.warn.message&quot;: &quot;true&quot;,
+    &quot;last_opened_file_path&quot;: &quot;C:/Users/genis/Documents/GitHub/music-visualization&quot;,
+    &quot;settings.editor.selected.configurable&quot;: &quot;preferences.fileTypes&quot;
   }
-}]]></component>
+}</component>
   <component name="RecentsManager">
     <key name="MoveFile.RECENT_KEYS">
       <recent name="C:\Users\genis\Documents\GitHub\music-visualization\landscape_visualizer\render" />
@@ -160,7 +163,31 @@
       <option name="project" value="LOCAL" />
       <updated>1783351503802</updated>
     </task>
-    <option name="localTasksCounter" value="7" />
+    <task id="LOCAL-00007" summary="positioning the mountains">
+      <option name="closed" value="true" />
+      <created>1783549219013</created>
+      <option name="number" value="00007" />
+      <option name="presentableId" value="LOCAL-00007" />
+      <option name="project" value="LOCAL" />
+      <updated>1783549219013</updated>
+    </task>
+    <task id="LOCAL-00008" summary="fixing bleeding">
+      <option name="closed" value="true" />
+      <created>1783597330446</created>
+      <option name="number" value="00008" />
+      <option name="presentableId" value="LOCAL-00008" />
+      <option name="project" value="LOCAL" />
+      <updated>1783597330446</updated>
+    </task>
+    <task id="LOCAL-00009" summary="fixing bleeding2">
+      <option name="closed" value="true" />
+      <created>1783600165167</created>
+      <option name="number" value="00009" />
+      <option name="presentableId" value="LOCAL-00009" />
+      <option name="project" value="LOCAL" />
+      <updated>1783600165167</updated>
+    </task>
+    <option name="localTasksCounter" value="10" />
     <servers />
   </component>
   <component name="Vcs.Log.Tabs.Properties">
@@ -181,6 +208,9 @@
     <MESSAGE value="without picture frames updated no ffmpeg logs" />
     <MESSAGE value="new video works" />
     <MESSAGE value="is it working" />
-    <option name="LAST_COMMIT_MESSAGE" value="is it working" />
+    <MESSAGE value="positioning the mountains" />
+    <MESSAGE value="fixing bleeding" />
+    <MESSAGE value="fixing bleeding2" />
+    <option name="LAST_COMMIT_MESSAGE" value="fixing bleeding2" />
   </component>
 </project>

@@ -174,7 +174,7 @@ def _align_length(arr: np.ndarray, target_len: int) -> np.ndarray:
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     import sys
-    audio_file = sys.argv[1] if len(sys.argv) > 1 else "test_song.mp3"
+    audio_file = sys.argv[1] if len(sys.argv) > 1 else "acdc_Thunderstruck-[AudioTrimmer.com].mp3"
 
     try:
         spec, bands, beats, onset, sr = extract_audio_frames(audio_file, fps=60)

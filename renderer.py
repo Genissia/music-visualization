@@ -1,86 +1,62 @@
 """
 renderer.py
 -----------
-ModernGL headless 3-D terrain renderer.
+Renders the slot-canyon corridor: two independent wall surfaces with the
+camera flying between them.
 
-Updated for "Static Top-Down Diorama":
-  - Camera is locked in a high, static isometric position.
-  - Orbital movement and beat-shake completely disabled.
-  - FOV narrowed to flatten perspective and keep the whole 1:1 plane perfectly framed.
+ARCHITECTURAL CHANGE
+--------------------
+Previously this drew ONE heightmap mesh. It now draws TWO wall meshes
+(left + right), each with its own VBO/VAO, sharing one shader program.
+
+Vertex data arrives already in WORLD SPACE from terrain_gen — the vertex
+shader no longer rescales anything. That was the source of the endless
+"tune the magic numbers" loop: scales were being applied in two places.
 """
 
 import moderngl
 import numpy as np
-import glm
-from PIL import Image, ImageFilter
-
-
-def _smoothstep(edge0: float, edge1: float, x: float) -> float:
-    t = max(0.0, min(1.0, (x - edge0) / (edge1 - edge0 + 1e-9)))
-    return t * t * (3.0 - 2.0 * t)
-
-
-def _compute_camera(frame_index, total_frames, beat_pulse, rng, shake_intensity):
-    # STATIC ISOMETRIC ANGLE
-    # Locked to a perfect 45-degree corner view (no orbit progression)
-    orbit_rad = np.radians(45.0)
-
-    # Pulled high up and back to perfectly frame the 1:1 square block
-    radius = 5.5
-    height = 5.5
-
-    cam_x = radius * np.sin(orbit_rad)
-    cam_z = radius * np.cos(orbit_rad)
-    cam_y = height
-
-    # Beat shake is technically still here, but SHAKE_INTENSITY is set to 0.0 below
-    if beat_pulse > 0.5 and shake_intensity > 0.0:
-        shake_y = abs(rng.uniform(0, shake_intensity))
-        shake_x = rng.uniform(-shake_intensity * 0.3, shake_intensity * 0.3)
-        shake_z = rng.uniform(-shake_intensity * 0.3, shake_intensity * 0.3)
-        cam_x  += shake_x
-        cam_y  += shake_y
-        cam_z  += shake_z
-
-    cam_pos = glm.vec3(cam_x, cam_y, cam_z)
-    
-    # Locked directly to the dead-center of the flat terrain plane
-    look_at = glm.vec3(0.0, 0.0, 0.0)
-
-    return cam_pos, look_at
+from pyglm import glm
+from PIL import Image, ImageFilter, ImageChops, ImageDraw
 
 
 class TerrainRenderer:
-    # ------------------------------------------------------------------
-    # TWEAK PANEL
-    # ------------------------------------------------------------------
-    RENDER_WIDTH    = 1920
-    RENDER_HEIGHT   = 1080
 
-    # Boosted slightly because top-down views make mountains look flatter
-    VERT_SCALE      = 0.050
+    RENDER_WIDTH  = 720
+    RENDER_HEIGHT = 720
 
-    # Narrow FOV gives it that rigid, perfect isometric diorama shape
-    FOV_DEGREES     = 30.0
-    
-    # Locked to 0.0 for a purely static camera
-    SHAKE_INTENSITY = 0.00
+    FOV_DEGREES = 70.0
 
-    FOG_NEAR        = 50.0
-    FOG_FAR         = 100.0
+    # Fog must span the full road depth (Z_NEAR=2 → Z_FAR=-18, so ~20 units)
+    FOG_NEAR = 6.0
+    FOG_FAR  = 17.0
 
-    BLOOM_THRESHOLD = 180    
-    BLOOM_RADIUS    = 16     
-    BLOOM_STRENGTH  = 0.60   
-    # ------------------------------------------------------------------
+    BLOOM_THRESHOLD = 120
+    BLOOM_RADIUS    = 7
+    BLOOM_STRENGTH  = 0.45
 
-    def __init__(self, grid_size: int):
+    # Camera lives INSIDE the canyon, WELL PAST THE ENTRANCE.
+    #
+    # CRITICAL: CAM_Z must be several units *inside* the corridor, not at
+    # its mouth. At the mouth (z ~ +1) the nearby walls fall outside the
+    # view frustum sideways and the mesh collapses to ~4% screen coverage
+    # (this was the "thin slivers" bug). A few units in → ~45% coverage,
+    # i.e. walls filling both sides of the frame.
+    CAM_HEIGHT = 1.6          # low in the slot, like sitting in a car
+    CAM_Z      = -4.0         # inside the corridor  (was +1.2 = at the mouth)
+    LOOK_Y     = 3.0          # gaze level-ish; walls run off the top of frame
+    LOOK_Z     = -16.0
+
+    def __init__(self, grid_size: int, n_height: int = 40):
         self.grid_size = grid_size
+        self.n_height  = n_height
         w, h = self.RENDER_WIDTH, self.RENDER_HEIGHT
 
         self.ctx = moderngl.create_standalone_context()
         self.ctx.enable(moderngl.DEPTH_TEST)
 
+        # Walls are one-sided surfaces; we want to see them from inside,
+        # so culling stays OFF (both faces render).
         self.fbo = self.ctx.framebuffer(
             color_attachments=[self.ctx.texture((w, h), 4)],
             depth_attachment=self.ctx.depth_renderbuffer((w, h)),
@@ -89,209 +65,282 @@ class TerrainRenderer:
         self.prog = self.ctx.program(
             vertex_shader="""
                 #version 330
+
+                // Vertices arrive in WORLD SPACE already — no rescaling here.
                 in vec3 in_position;
+                in vec3 in_normal;     // analytic normal from terrain_gen
+
                 uniform mat4 mvp;
-                uniform float vert_scale;
-                
-                uniform int is_wireframe;
-                
-                out float v_height;
+
+                out vec3  v_nrm;
                 out vec3  v_pos;
+                out float v_height;   // 0 at canyon floor, 1 at rim
+                out float v_depth;    // 0 near camera, 1 far away
+
+                uniform float wall_height;
+                uniform float z_near;
+                uniform float z_far;
 
                 void main() {
-                    vec3 pos = vec3(in_position.x, in_position.y * vert_scale, in_position.z);
-                    
-                    if (is_wireframe == 1) {
-                        pos.y += 0.005; 
-                    }
-                    
+                    vec3 pos = in_position;
+
                     gl_Position = mvp * vec4(pos, 1.0);
-                    v_height = pos.y;
+
                     v_pos    = pos;
+                    v_nrm    = normalize(in_normal);
+                    v_height = clamp(pos.y / wall_height, 0.0, 1.0);
+                    v_depth  = clamp((pos.z - z_near) / (z_far - z_near), 0.0, 1.0);
                 }
             """,
             fragment_shader="""
                 #version 330
-                in float v_height;
+
                 in vec3  v_pos;
+                in vec3  v_nrm;
+                in float v_height;
+                in float v_depth;
+
                 out vec4 fragColor;
 
                 uniform vec3  light_dir;
                 uniform vec3  cam_pos;
                 uniform float ambient;
 
-                uniform vec3 col_valley;
-                uniform vec3 col_mid;
-                uniform vec3 col_peak;
+                uniform vec3 col_floor;   // deep in the canyon — darkest
+                uniform vec3 col_mid;     // mid-wall
+                uniform vec3 col_rim;     // top of the wall, catches the light
 
                 uniform vec3  fog_color;
                 uniform float fog_near;
                 uniform float fog_far;
 
-                // --- AUDIO REACTIVE UNIFORMS ---
-                uniform int   is_wireframe;
-                uniform float beat_pulse;
-                uniform float treble_energy;
-
                 void main() {
-                    vec3 normal = normalize(cross(dFdx(v_pos), dFdy(v_pos)));
+                    // Analytic normal from terrain_gen.
+                    // (dFdx/dFdy derivatives collapse to zero at grazing
+                    //  angles down the corridor and produce NaN -> black.)
+                    vec3 normal = normalize(v_nrm);
 
-                    // DYNAMIC LIGHTING PHYSICS
-                    vec3 dyn_light_dir = normalize(light_dir + vec3(sin(beat_pulse * 10.0)*0.5, 0.0, cos(beat_pulse * 10.0)*0.5));
-                    float diff = max(dot(normal, dyn_light_dir), 0.0);
+                    vec3  L    = normalize(light_dir);
+                    float diff = max(dot(normal, L), 0.0) * 0.7 + 0.3;
 
-                    float flash = beat_pulse * 2.0;
-                    float dyn_ambient = ambient + (treble_energy * 0.5);
+                    vec3  V    = normalize(cam_pos - v_pos);
+                    vec3  R    = reflect(-L, normal);
+                    float spec = pow(max(dot(V, R), 0.0), 24.0) * 0.35;
 
-                    vec3 V = normalize(cam_pos - v_pos);
-                    vec3 R = reflect(-dyn_light_dir, normal);
-                    float spec = pow(max(dot(V, R), 0.0), 32.0) * (0.4 + flash);
+                    float lighting = ambient + diff * 0.8 + spec;
 
-                    float lighting = dyn_ambient + diff + spec;
-
-                    // HEIGHT COLORS
+                    // Vertical colour gradient: dark floor → bright rim.
+                    // This is what sells the "light pouring in from above"
+                    // look of the reference photograph.
                     vec3 color;
-                    if (abs(v_height) < 0.02) {
-                        color = col_highway;  // Flat clean road asphalt
+                    if (v_height < 0.55) {
+                        color = mix(col_floor, col_mid, v_height / 0.55);
                     } else {
-                        // Blend between mountain slopes and illuminated neon wave crests
-                        float t = clamp(abs(v_height) * 2.2, 0.0, 1.0);
-                        color = mix(col_wave_slope, col_wave_crest, t);
+                        color = mix(col_mid, col_rim, (v_height - 0.55) / 0.45);
                     }
 
-                    // MATERIAL PASS (SOLID CORE vs GLOWING NEON)
-                    vec3 lit;
-                    if (is_wireframe == 1) {
-                        lit = color * (1.8 + flash);
-                    } else {
-                        lit = color * lighting * 0.20; 
-                    }
+                    // Ambient occlusion: the deeper into the slot, the darker.
+                    float ao = 0.60 + 0.40 * pow(v_height, 0.6);
+                    color *= ao;
 
-                    // DEPTH FOG
-                    float dist  = length(v_pos);
+                    vec3 lit = color * lighting;
+
+                    float dist  = length(v_pos - cam_pos);
                     float fog_t = clamp((dist - fog_near) / (fog_far - fog_near), 0.0, 1.0);
                     vec3 final  = mix(lit, fog_color, fog_t);
 
-                    vec3 final = mix(lit, fog_color, fog_t);
-                    fragColor  = vec4(final, 1.0);
+                    fragColor = vec4(final, 1.0);
                 }
             """,
         )
 
-        self.vbo = self.ctx.buffer(reserve=grid_size * grid_size * 12)
+        # ------------------------------------------------------------------
+        # Index buffer for ONE wall: an (n_z x n_y) quad grid.
+        # Both walls share the same topology, so one IBO serves both.
+        # ------------------------------------------------------------------
+        nz, ny = grid_size, n_height
+        idx = []
+        for i in range(nz - 1):
+            for j in range(ny - 1):
+                a = i * ny + j
+                b = a + 1
+                c = (i + 1) * ny + j
+                d = c + 1
+                idx.extend([a, c, b,  b, c, d])
 
-        indices = []
-        for i in range(grid_size - 1):
-            for j in range(grid_size - 1):
-                tl = i * grid_size + j
-                tr = tl + 1
-                bl = (i + 1) * grid_size + j
-                br = bl + 1
-                indices.extend([tl, bl, tr, tr, bl, br])
+        self.ibo = self.ctx.buffer(np.array(idx, dtype="i4").tobytes())
 
-        self.ibo = self.ctx.buffer(np.array(indices, dtype="i4").tobytes())
-        self.vao = self.ctx.vertex_array(
-            self.prog, [(self.vbo, "3f", "in_position")], self.ibo
+        # Two separate VBOs — one per wall. This is what keeps the walls
+        # disconnected: there is no triangle bridging them.
+        # 6 floats per vertex now: position(3) + normal(3)
+        nbytes = nz * ny * 6 * 4
+        self.vbo_left  = self.ctx.buffer(reserve=nbytes)
+        self.vbo_right = self.ctx.buffer(reserve=nbytes)
+
+        self.vao_left = self.ctx.vertex_array(
+            self.prog, [(self.vbo_left, "3f 3f", "in_position", "in_normal")], self.ibo
+        )
+        self.vao_right = self.ctx.vertex_array(
+            self.prog, [(self.vbo_right, "3f 3f", "in_position", "in_normal")], self.ibo
         )
 
-        self.prog["vert_scale"].value = self.VERT_SCALE
-        self.prog["light_dir"].value  = (1.5, 3.0, 1.0)
-        self.prog["fog_color"].value  = (0.01, 0.01, 0.015) 
-        self.prog["fog_near"].value   = self.FOG_NEAR
-        self.prog["fog_far"].value    = self.FOG_FAR
-        self.prog["ambient"].value    = 0.35 
+        # ------------------------------------------------------------------
+        # CANYON FLOOR — its own mesh. Without it, everything below the
+        # camera's eye line is empty space and renders black (the
+        # horizontal "x-axis cut" across the middle of the frame).
+        # ------------------------------------------------------------------
+        self.n_floor_x = 12
+        fx = self.n_floor_x
+        fidx = []
+        for i in range(nz - 1):
+            for j in range(fx - 1):
+                a = i * fx + j
+                b = a + 1
+                c = (i + 1) * fx + j
+                d = c + 1
+                fidx.extend([a, c, b,  b, c, d])
+        self.ibo_floor = self.ctx.buffer(np.array(fidx, dtype="i4").tobytes())
+        self.vbo_floor = self.ctx.buffer(reserve=nz * fx * 6 * 4)
+        self.vao_floor = self.ctx.vertex_array(
+            self.prog, [(self.vbo_floor, "3f 3f", "in_position", "in_normal")],
+            self.ibo_floor
+        )
 
-        self._rng = np.random.default_rng(seed=0)
+        self._set("fog_near",    self.FOG_NEAR)
+        self._set("fog_far",     self.FOG_FAR)
+        self._set("wall_height", 9.0)   # colour-ramp reference, NOT geometry height
+        self._set("z_near",      2.0)
+        self._set("z_far",     -18.0)
 
+        self._rng = np.random.default_rng(seed=999)
+
+    # ------------------------------------------------------------------
+    def _set(self, name, value):
+        if name in self.prog:
+            self.prog[name].value = value
+
+    # ------------------------------------------------------------------
     def render_frame(
-        self, X_gpu, Y_gpu, Z_gpu, frame_index: int, total_frames: int = 1,
-        band_energies: dict = None, beat_pulse: float = 0.0, frame_path: str = None,
+        self,
+        left_wall,
+        right_wall,
+        floor,
+        frame_index:   int,
+        total_frames:  int   = 1,
+        band_energies: dict  = None,
+        beat_pulse:    float = 0.0,
+        frame_path:    str   = None,
     ) -> Image.Image:
-        
+
         if band_energies is None:
             band_energies = {}
 
-        progress = frame_index / max(total_frames, 1)
+        # GPU → CPU if needed
+        L = left_wall.get()  if hasattr(left_wall,  "get") else left_wall
+        R = right_wall.get() if hasattr(right_wall, "get") else right_wall
+        F = floor.get()      if hasattr(floor,      "get") else floor
 
-        cam_pos, look_at = _compute_camera(
-            frame_index, total_frames, beat_pulse, self._rng, self.SHAKE_INTENSITY
+        self.vbo_left.write(np.ascontiguousarray(L, dtype="f4").tobytes())
+        self.vbo_right.write(np.ascontiguousarray(R, dtype="f4").tobytes())
+        self.vbo_floor.write(np.ascontiguousarray(F, dtype="f4").tobytes())
+
+        sub    = float(band_energies.get("sub_bass", 0.0))
+        mid    = float(band_energies.get("mid",      0.0))
+        treble = float(band_energies.get("treble",   0.0))
+
+        # ----------------------------------------------------------------
+        # Lightning
+        # ----------------------------------------------------------------
+        is_lightning = (
+            (beat_pulse > 0.5 and self._rng.random() > 0.60) or
+            (treble > 0.88    and self._rng.random() > 0.75)
         )
 
-        self.prog["cam_pos"].value = (cam_pos.x, cam_pos.y, cam_pos.z)
+        if is_lightning:
+            ambient_val = 1.05
+            self._set("light_dir", (
+                self._rng.uniform(-1.5, 1.5), 2.0, self._rng.uniform(-1.5, 1.5)
+            ))
+        else:
+            ambient_val = 0.50 + mid * 0.15
+            self._set("light_dir", (1.0, 1.5, -0.8))    # sideways+up: vertical walls catch it
 
-        view = glm.lookAt(cam_pos, look_at, glm.vec3(0, 1, 0))
+        sky      = (0.02, 0.01, 0.04)                    # background behind the canyon
+        fog_glow = (0.75, 0.42 + treble * 0.2, 0.95)     # light pouring down the slot
+
+        self._set("ambient",   ambient_val)
+        self._set("fog_color", fog_glow)
+
+        # Vertical palette: near-black floor → purple mid → hot magenta rim
+        self._set("col_floor", (0.20, 0.04, 0.30))
+        self._set("col_mid",   (0.55, 0.10, 0.80))
+        self._set("col_rim",   (1.0, 0.55 + treble * 0.35, 1.0))
+
+        # ----------------------------------------------------------------
+        # Camera — inside the canyon, low, looking down the corridor
+        # ----------------------------------------------------------------
+        tt   = frame_index * 0.05
+        vx   = np.sin(tt * 1.7) * 0.05
+        vy   = np.cos(tt * 2.3) * 0.03
+        drop = beat_pulse * -0.06
+
+        cam = glm.vec3(vx, self.CAM_HEIGHT + vy + drop, self.CAM_Z)
+        tgt = glm.vec3(vx * 0.5, self.LOOK_Y, self.LOOK_Z)
+
         proj = glm.perspective(
             glm.radians(self.FOV_DEGREES),
             self.RENDER_WIDTH / self.RENDER_HEIGHT,
-            0.1, 100.0,
+            0.05, 60.0
         )
-        
-        mvp = proj * view
-        self.prog["mvp"].write(np.array(mvp, dtype="f4").tobytes())
+        view = glm.lookAt(cam, tgt, glm.vec3(0, 1, 0))
+        mvp  = proj * view
 
-        self.prog["beat_pulse"].value    = float(beat_pulse)
-        self.prog["treble_energy"].value = float(band_energies.get("treble", 0.0))
+        if "mvp" in self.prog:
+            # NOTE: glm stores matrices COLUMN-major. np.array(mvp).tobytes()
+            # serialises them row-major, which uploads the TRANSPOSE and
+            # silently destroys the projection (the floor collapses onto the
+            # horizon and the frame gets cut in half). The .T restores the
+            # correct memory order.
+            self.prog["mvp"].write(np.array(mvp, dtype="f4").T.tobytes())
+        self._set("cam_pos", (cam.x, cam.y, cam.z))
 
-        t_warm = _smoothstep(0.35, 0.65, progress)
-
-        cool_valley = np.array([0.05, 0.05, 0.25])
-        cool_mid    = np.array([0.15, 0.80, 0.90]) 
-        cool_peak   = np.array([0.90, 0.95, 1.00])
-
-        warm_valley = np.array([0.15, 0.02, 0.05])
-        warm_mid    = np.array([0.95, 0.30, 0.05]) 
-        warm_peak   = np.array([1.00, 0.90, 0.40])
-
-        # Look straight down the negative Z-axis corridor towards the horizon
-        look_at = glm.vec3(0.0, 0.12, -2.5)
-
-        mid_energy = band_energies.get("mid", 0.0)
-        peak = peak + (1.0 - peak) * mid_energy * 0.35
-
-        self.prog["mvp"].write(np.array(mvp, dtype=np.float32).tobytes())
-        self.prog["cam_pos"].value = (cam_x, cam_y, cam_z)
-
+        # ----------------------------------------------------------------
+        # Draw BOTH walls
+        # ----------------------------------------------------------------
         self.fbo.use()
-        bg = (0.01, 0.01, 0.015) 
-        self.fbo.clear(bg[0], bg[1], bg[2], 1.0)
+        self.ctx.clear(sky[0], sky[1], sky[2], 1.0)
+        self.vao_left.render(moderngl.TRIANGLES)
+        self.vao_right.render(moderngl.TRIANGLES)
+        self.vao_floor.render(moderngl.TRIANGLES)
 
-        X = X_gpu.get()
-        Y = Y_gpu.get()
-        Z = Z_gpu.get()
-        vertices = np.stack([X, Y, Z], axis=-1).astype("f4").tobytes()
-        self.vbo.write(vertices)
+        raw = self.fbo.read(components=3)
+        img = Image.frombytes("RGB", (self.RENDER_WIDTH, self.RENDER_HEIGHT), raw)
+        img = img.transpose(Image.FLIP_TOP_BOTTOM)
 
-        # PASS 1: Solid Dark Terrain Core
-        self.prog["is_wireframe"].value = 0
-        self.ctx.wireframe = False
-        self.vao.render(moderngl.TRIANGLES)
+        # ----------------------------------------------------------------
+        # Lightning bolt in the sky slot above
+        # ----------------------------------------------------------------
+        if is_lightning:
+            d  = ImageDraw.Draw(img)
+            cx = self._rng.uniform(self.RENDER_WIDTH * 0.40, self.RENDER_WIDTH * 0.60)
+            cy = 0.0
+            pts = [(cx, cy)]
+            while cy < self.RENDER_HEIGHT * 0.45:
+                cy += self._rng.uniform(14, 28)
+                cx += self._rng.uniform(-26, 26)
+                pts.append((cx, cy))
+            d.line(pts, fill=(170, 220, 255), width=5)
+            d.line(pts, fill=(255, 255, 255), width=2)
 
-        # PASS 2: Glowing Neon Wireframe Overlay
-        self.prog["is_wireframe"].value = 1
-        self.ctx.wireframe = True
-        self.vao.render(moderngl.TRIANGLES)
-        self.ctx.wireframe = False 
-
-        raw = self.fbo.color_attachments[0].read()
-        img = Image.frombytes("RGBA", (self.RENDER_WIDTH, self.RENDER_HEIGHT), raw)
-        img = img.convert("RGB").transpose(Image.FLIP_TOP_BOTTOM)
-
-        img = self._apply_bloom(img)
+        # ----------------------------------------------------------------
+        # Bloom
+        # ----------------------------------------------------------------
+        if self.BLOOM_STRENGTH > 0:
+            bright = img.point(lambda p: p if p > self.BLOOM_THRESHOLD else 0)
+            blur   = bright.filter(ImageFilter.GaussianBlur(radius=self.BLOOM_RADIUS))
+            img    = Image.blend(img, ImageChops.screen(img, blur), self.BLOOM_STRENGTH)
 
         if frame_path:
             img.save(frame_path)
 
         return img
-
-    def _apply_bloom(self, img: Image.Image) -> Image.Image:
-        arr = np.array(img, dtype=np.float32)
-
-        bright_mask  = arr.max(axis=2, keepdims=True) > self.BLOOM_THRESHOLD
-        bright_layer = arr * bright_mask
-
-        bright_img  = Image.fromarray(np.clip(bright_layer, 0, 255).astype(np.uint8))
-        blurred     = bright_img.filter(ImageFilter.GaussianBlur(radius=self.BLOOM_RADIUS))
-        blurred_arr = np.array(blurred, dtype=np.float32)
-
-        bloomed = np.clip(arr + blurred_arr * self.BLOOM_STRENGTH, 0, 255).astype(np.uint8)
-        return Image.fromarray(bloomed)

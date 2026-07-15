@@ -1,89 +1,244 @@
-import numpy as np
-import cupy as cp
-import time
+"""
+terrain_gen.py
+--------------
+Builds SLOT CANYON corridor geometry (not a heightmap).
 
-_prev_Y = None
+ARCHITECTURAL CHANGE
+--------------------
+Old approach (heightmap): grid over (X, Z), audio drives Y (height).
+    → Can only make hills viewed from above.
+    → Vertical walls collapse to slivers. Cannot make a slot canyon.
+
+New approach (corridor): grid over (Z, Y), audio drives X (wall displacement).
+    → Each wall is a vertical surface running down the road.
+    → Z = how far down the road    (parameter)
+      Y = how high up the wall     (parameter)
+      X = how far the wall bulges  (AUDIO-DRIVEN)
+    → Camera sits INSIDE the corridor at low Y, looking down -Z.
+
+Returns two meshes: left wall and right wall, each shape (N_Z, N_Y, 3).
+They are completely separate surfaces — never connected.
+"""
+
+import numpy as np
+
+try:
+    import cupy as cp
+    if cp.cuda.runtime.getDeviceCount() == 0:
+        raise RuntimeError("No CUDA devices")
+    print("[terrain] Using NVIDIA CUDA (CuPy).")
+except Exception:
+    import numpy as cp
+    print("[terrain] Falling back to CPU (NumPy).")
+
+
+# ---------------------------------------------------------------------------
+# Canyon shape constants — tune these to change the canyon's character
+# ---------------------------------------------------------------------------
+Z_NEAR       =   2.0    # road starts just behind the camera
+Z_FAR        = -18.0    # road vanishes into the distance
+WALL_HEIGHT  =  22.0    # walls run PAST the top of frame — the rim must
+                        # never be visible, or you see it rake toward the
+                        # vanishing point and the canyon reads as distant hills
+
+GAP_BOTTOM   =   0.70   # half-width at the floor — the narrow lane you drive
+GAP_TOP      =   1.60   # half-width high up — only a slight lean outward,
+                        # so the wall edges stay near-VERTICAL on screen
+
+BULGE_AUDIO  =   0.90   # how far audio pushes the walls in/out
+BULGE_NOISE  =   0.35   # baseline organic waviness (independent of audio)
+
+_prev_L = None
+_prev_R = None
+
 
 def create_terrain_frame(
     audio_frame:   np.ndarray,
     band_energies: dict,
     beat_pulse:    float,
-    grid_size:     int   = 100,
-    noise_scale:   float = 0.05,
-    amplitude:     float = 4.0,  # Lowered from 5.0 to keep peaks controlled
+    grid_size:     int   = 150,
+    n_height:      int   = 40,
     frame_index:   int   = 0,
-    smooth_alpha:  float = 0.08, # Dropped to 0.08 for maximum liquid smoothness
+    smooth_alpha:  float = 0.35,
+    **_ignored,
 ) -> tuple:
-    
-    global _prev_Y
+    """
+    Returns
+    -------
+    left_wall  : ndarray (n_z, n_y, 3)  — vertices of the left canyon wall
+    right_wall : ndarray (n_z, n_y, 3)  — vertices of the right canyon wall
+    """
+    global _prev_L, _prev_R
 
-    # 1. Base 1:1 Square Grid
-    x = cp.linspace(-1, 1, grid_size)
-    z = cp.linspace(-1, 1, grid_size)
-    X, Z = cp.meshgrid(x, z)
+    n_z = grid_size
+    n_y = n_height
 
-    # 2. Audio-driven frequency ridges
-    original_bins  = np.linspace(0, 1, len(audio_frame))
-    target_bins    = np.linspace(0, 1, grid_size)
-    resized_audio  = np.interp(target_bins, original_bins, audio_frame)
+    # ------------------------------------------------------------------
+    # Parameter grid.
+    #   zi : 0 (near, at camera) → 1 (far, vanishing point)
+    #   yi : 0 (canyon floor)    → 1 (canyon rim)
+    # ------------------------------------------------------------------
+    zi = cp.linspace(0.0, 1.0, n_z).reshape(n_z, 1)   # column vector
+    yi = cp.linspace(0.0, 1.0, n_y).reshape(1, n_y)   # row vector
 
-    resized_audio  = np.log1p(resized_audio)
+    Zg = cp.broadcast_to(zi, (n_z, n_y))
+    Yg = cp.broadcast_to(yi, (n_z, n_y))
 
-    Y_audio = cp.tile(cp.array(resized_audio, dtype=cp.float32), (grid_size, 1))
+    # World Z (depth) and world Y (height) — these are pure parameters,
+    # they do NOT depend on audio. Only X does.
+    world_z = Z_NEAR + (Z_FAR - Z_NEAR) * Zg
+    world_y = WALL_HEIGHT * Yg
 
-    # Reduced bass_boost multiplier so the kick drum doesn't blast out of frame
-    bass_boost = 1.0 + band_energies.get("bass", 0.0) * 0.4
-    Y_audio   *= amplitude * bass_boost
+    # ------------------------------------------------------------------
+    # Audio → wall displacement
+    # ------------------------------------------------------------------
+    bass   = band_energies.get("bass",     0.0)
+    sub    = band_energies.get("sub_bass", 0.0)
+    mid    = band_energies.get("mid",      0.0)
+    treble = band_energies.get("treble",   0.0)
 
-    # 3. Procedural GPU Noise
-    time_offset = frame_index * 0.008   
-    effective_scale = (grid_size * noise_scale) / 2.0
+    # scroll term: makes the wall shapes travel toward the camera
+    t = frame_index * 0.035
 
-    Y_macro  = _get_gpu_fractal_noise(X, Z, time_offset, effective_scale * 1.0, octaves=2)
-    Y_detail = _get_gpu_fractal_noise(X, Z, time_offset * 1.5, effective_scale * 3.5, octaves=6)
+    # Depth phase — the wall carves in and out as you travel down the road.
+    # Multiple frequencies give the eroded, layered look of real slot canyons.
+    zf = Zg * 14.0    # spatial frequency along the road
 
-    treble_boost = 1.0 + band_energies.get("treble", 0.0) * 0.8
-    Y_noise = Y_macro * 2.5 + Y_detail * 0.8 * treble_boost
+    carve_left = (
+        cp.sin(zf * 1.00 + t * 1.00) * (0.45 + bass   * 0.9) +
+        cp.sin(zf * 2.30 + t * 1.45) * (0.25 + mid    * 0.5) +
+        cp.sin(zf * 4.70 + t * 2.10) * (0.12 + treble * 0.3)
+    )
 
-    # 4. Smoothened Beat-driven terrain pop
+    # Right wall uses different phase offsets so the two walls are
+    # independent — they never mirror each other exactly.
+    carve_right = (
+        cp.sin(zf * 1.00 + t * 1.00 + 2.1) * (0.45 + bass   * 0.9) +
+        cp.sin(zf * 2.30 + t * 1.45 + 4.3) * (0.25 + mid    * 0.5) +
+        cp.sin(zf * 4.70 + t * 2.10 + 1.7) * (0.12 + treble * 0.3)
+    )
+
+    # Height phase — walls also undulate as they rise, which is what gives
+    # slot canyons their smooth sculpted ripples rather than flat slabs.
+    height_ripple_L = cp.sin(Yg * 6.0 + zf * 0.8) * 0.30
+    height_ripple_R = cp.sin(Yg * 6.0 + zf * 0.8 + 3.1) * 0.30
+
+    # ------------------------------------------------------------------
+    # Base gap: canyon is narrow at the floor and flares open at the rim.
+    # (Look at the reference photo — the walls lean away as they go up.)
+    # ------------------------------------------------------------------
+    base_gap = GAP_BOTTOM + (GAP_TOP - GAP_BOTTOM) * (Yg ** 1.4)
+
+    # Displacement is stronger higher up (floor stays tight, rim is wild)
+    bulge_scale = 0.25 + 0.75 * Yg
+
+    disp_L = (carve_left  * BULGE_AUDIO + height_ripple_L * BULGE_NOISE) * bulge_scale
+    disp_R = (carve_right * BULGE_AUDIO + height_ripple_R * BULGE_NOISE) * bulge_scale
+
+    # Beat: walls punch inward briefly, squeezing the corridor
     if beat_pulse > 0.5:
-        cx, cz     = 0.0, 0.0
-        dist_sq    = (X - cx) ** 2 + (Z - cz) ** 2
-        
-        # Softened beat pop to match the new fluid look
-        beat_bump  = cp.exp(-dist_sq / 1.5) * band_energies.get("sub_bass", 0.5) * 1.2
-        Y_noise   += beat_bump
+        squeeze = sub * 0.45 * bulge_scale
+        disp_L += squeeze
+        disp_R += squeeze
 
-    # 5. Combine layers
-    Y_raw = Y_audio + Y_noise
+    # Left wall sits at NEGATIVE x, right wall at POSITIVE x.
+    # Never allow a wall to cross the centre line — clamp keeps the road open.
+    left_x  = -cp.maximum(base_gap + disp_L, 0.35)
+    right_x =  cp.maximum(base_gap + disp_R, 0.35)
 
-    # 6. Temporal smoothing (liquid blending)
-    if _prev_Y is not None and _prev_Y.shape == Y_raw.shape:
-        Y = smooth_alpha * Y_raw + (1.0 - smooth_alpha) * _prev_Y
-    else:
-        Y = Y_raw
+    # ------------------------------------------------------------------
+    # Temporal smoothing on the X displacement only
+    # ------------------------------------------------------------------
+    if _prev_L is not None and _prev_L.shape == left_x.shape:
+        left_x  = smooth_alpha * left_x  + (1.0 - smooth_alpha) * _prev_L
+        right_x = smooth_alpha * right_x + (1.0 - smooth_alpha) * _prev_R
+    _prev_L, _prev_R = left_x, right_x
 
-    _prev_Y = Y
+    # ------------------------------------------------------------------
+    # Pack positions into (n_z, n_y, 3)
+    # ------------------------------------------------------------------
+    left_pos  = cp.stack([left_x,  world_y, world_z], axis=-1).astype(cp.float32)
+    right_pos = cp.stack([right_x, world_y, world_z], axis=-1).astype(cp.float32)
 
-    return X, Y, Z
+    # ------------------------------------------------------------------
+    # ANALYTIC NORMALS  (critical!)
+    #
+    # We must NOT let the fragment shader derive normals with dFdx/dFdy.
+    # When the camera looks *down* the corridor, the walls are at a
+    # grazing angle to the view; the two screen-space derivatives become
+    # nearly parallel, their cross product collapses toward zero, and
+    # normalize() returns NaN -> the wall renders BLACK.
+    #
+    # Instead we compute the true surface normal from the parametric
+    # tangents:   n = normalize( dP/dz  x  dP/dy )
+    # This is exact, view-independent, and never degenerates.
+    # ------------------------------------------------------------------
+    left_nrm  = _surface_normals(left_pos,  inward=+1.0)   # left wall faces +X
+    right_nrm = _surface_normals(right_pos, inward=-1.0)   # right wall faces -X
+
+    # Interleave position+normal: (n_z, n_y, 6)
+    left_wall  = cp.concatenate([left_pos,  left_nrm],  axis=-1).astype(cp.float32)
+    right_wall = cp.concatenate([right_pos, right_nrm], axis=-1).astype(cp.float32)
+
+    # ------------------------------------------------------------------
+    # CANYON FLOOR
+    #
+    # Without this the frame is black below the horizon: the camera sits
+    # at y=1.6 but the walls only START at y=0, so there is simply no
+    # geometry beneath the eye line. That is the horizontal "x-axis cut".
+    #
+    # The floor is a strip that spans from the left wall's base to the
+    # right wall's base at every point down the road, so it always meets
+    # the walls exactly — no gaps, no matter how the walls move.
+    # ------------------------------------------------------------------
+    floor_lx = left_x[:, 0]     # wall base X at each z  (n_z,)
+    floor_rx = right_x[:, 0]
+
+    n_fx = 12                   # lateral resolution across the floor
+    u = cp.linspace(0.0, 1.0, n_fx).reshape(1, n_fx)          # 0=left, 1=right
+
+    floor_x = floor_lx.reshape(n_z, 1) + \
+              (floor_rx - floor_lx).reshape(n_z, 1) * u        # (n_z, n_fx)
+    floor_z = world_z[:, 0].reshape(n_z, 1) * cp.ones((1, n_fx))
+
+    # Gentle undulation so the floor isn't a mirror-flat plane
+    floor_y = cp.abs(cp.sin(floor_z * 0.6 + t * 0.5)) * 0.10 \
+            + cp.abs(cp.cos(floor_x * 1.3)) * 0.05
+
+    floor_pos = cp.stack([floor_x, floor_y, floor_z], axis=-1).astype(cp.float32)
+    floor_nrm = _surface_normals(floor_pos, inward=0.0, up=True)
+
+    floor = cp.concatenate([floor_pos, floor_nrm], axis=-1).astype(cp.float32)
+
+    return left_wall, right_wall, floor
 
 
-def _get_gpu_fractal_noise(X: cp.ndarray, Z: cp.ndarray, time_offset: float, scale: float, octaves: int) -> cp.ndarray:
-    Y = cp.zeros_like(X)
-    amp = 1.0
-    freq = scale
-    
-    for i in range(octaves):
-        phase_x = time_offset * (1.0 + i * 0.5)
-        phase_z = time_offset * (0.8 + i * 0.4)
-        
-        term1 = cp.sin(X * freq + phase_x)
-        term2 = cp.cos(Z * freq + phase_z)
-        term3 = cp.sin((X + Z) * freq * 0.7 - time_offset)
-        
-        Y += (term1 * term2 + term3 * 0.3) * amp
-        
-        amp *= 0.5
-        freq *= 2.0
-        
-    return Y * 0.5
+def _surface_normals(P, inward: float, up: bool = False):
+    """
+    P : (n, m, 3) vertex positions
+    Returns (n, m, 3) unit normals facing the camera.
+
+    inward : for WALLS, +1 = left wall (normal points +X toward the road),
+             -1 = right wall (normal points -X).
+    up     : for the FLOOR, force the normal to point +Y (skywards).
+    """
+    # Tangent along the road (axis 0 = z) and up the wall (axis 1 = y)
+    t_z = cp.gradient(P, axis=0)
+    t_y = cp.gradient(P, axis=1)
+
+    n = cp.cross(t_z, t_y)
+
+    length = cp.sqrt((n ** 2).sum(axis=-1, keepdims=True))
+    n = n / cp.maximum(length, 1e-8)
+
+    if up:
+        # Floor: normal must point skywards, never down into the ground.
+        flip = cp.sign(n[..., 1:2])
+        flip = cp.where(flip == 0, 1.0, flip)
+        return n * flip
+
+    # Walls: X component points toward the corridor centre, so both walls
+    # are lit from inside rather than from within the rock.
+    flip = cp.sign(n[..., 0:1] * inward)
+    flip = cp.where(flip == 0, 1.0, flip)
+    return n * flip
