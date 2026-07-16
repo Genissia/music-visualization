@@ -37,9 +37,7 @@ except Exception:
 # ---------------------------------------------------------------------------
 Z_NEAR       =   2.0    # road starts just behind the camera
 Z_FAR        = -18.0    # road vanishes into the distance
-WALL_HEIGHT  =  22.0    # walls run PAST the top of frame — the rim must
-                        # never be visible, or you see it rake toward the
-                        # vanishing point and the canyon reads as distant hills
+WALL_HEIGHT  =   8.0    # walls fit inside the shot and top rims are visible
 
 GAP_BOTTOM   =   0.70   # half-width at the floor — the narrow lane you drive
 GAP_TOP      =   1.60   # half-width high up — only a slight lean outward,
@@ -97,8 +95,8 @@ def create_terrain_frame(
     mid    = band_energies.get("mid",      0.0)
     treble = band_energies.get("treble",   0.0)
 
-    # scroll term: makes the wall shapes travel toward the camera
-    t = frame_index * 0.035
+    # scroll term: makes the wall shapes travel toward the camera (speed up)
+    t = frame_index * 0.06
 
     # Depth phase — the wall carves in and out as you travel down the road.
     # Multiple frequencies give the eroded, layered look of real slot canyons.
@@ -132,8 +130,20 @@ def create_terrain_frame(
     # Displacement is stronger higher up (floor stays tight, rim is wild)
     bulge_scale = 0.25 + 0.75 * Yg
 
-    disp_L = (carve_left  * BULGE_AUDIO + height_ripple_L * BULGE_NOISE) * bulge_scale
-    disp_R = (carve_right * BULGE_AUDIO + height_ripple_R * BULGE_NOISE) * bulge_scale
+    # Procedural high-frequency rough rock textures (multi-octave sines)
+    rock_noise_L = (
+        cp.sin(Zg * 35.0 + Yg * 18.0 + t * 0.3) * 0.04 +
+        cp.sin(Zg * 67.0 - Yg * 32.0 - t * 0.1) * 0.02 +
+        cp.sin(Zg * 115.0 + Yg * 57.0) * 0.01
+    )
+    rock_noise_R = (
+        cp.sin(Zg * 35.0 + Yg * 18.0 + t * 0.3 + 1.5) * 0.04 +
+        cp.sin(Zg * 67.0 - Yg * 32.0 - t * 0.1 + 2.8) * 0.02 +
+        cp.sin(Zg * 115.0 + Yg * 57.0 + 4.1) * 0.01
+    )
+
+    disp_L = (carve_left  * BULGE_AUDIO + height_ripple_L * BULGE_NOISE + rock_noise_L) * bulge_scale
+    disp_R = (carve_right * BULGE_AUDIO + height_ripple_R * BULGE_NOISE + rock_noise_R) * bulge_scale
 
     # Beat: walls punch inward briefly, squeezing the corridor
     if beat_pulse > 0.5:

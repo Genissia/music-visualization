@@ -22,8 +22,8 @@ from PIL import Image, ImageFilter, ImageChops, ImageDraw
 
 class TerrainRenderer:
 
-    RENDER_WIDTH  = 720
-    RENDER_HEIGHT = 720
+    RENDER_WIDTH  = 1920
+    RENDER_HEIGHT = 1080
 
     FOV_DEGREES = 70.0
 
@@ -208,11 +208,34 @@ class TerrainRenderer:
 
         self._set("fog_near",    self.FOG_NEAR)
         self._set("fog_far",     self.FOG_FAR)
-        self._set("wall_height", 9.0)   # colour-ramp reference, NOT geometry height
+        self._set("wall_height", 5.5)   # colour-ramp reference (matches WALL_HEIGHT in terrain_gen.py)
         self._set("z_near",      2.0)
         self._set("z_far",     -18.0)
 
         self._rng = np.random.default_rng(seed=999)
+
+        # Beat-responsive wave color state
+        self.beat_glow = 0.5
+        self.last_frame_was_beat = False
+
+    # ------------------------------------------------------------------
+    def _hsv_to_rgb(self, h: float, s: float, v: float) -> tuple:
+        """Convert HSV color space to RGB color space."""
+        if s == 0.0:
+            return (v, v, v)
+        i = int(h * 6.0)
+        f = (h * 6.0) - i
+        p = v * (1.0 - s)
+        q = v * (1.0 - s * f)
+        t = v * (1.0 - s * (1.0 - f))
+        i %= 6
+        if i == 0: return (v, t, p)
+        if i == 1: return (q, v, p)
+        if i == 2: return (p, v, t)
+        if i == 3: return (p, q, v)
+        if i == 4: return (t, p, v)
+        if i == 5: return (v, p, q)
+        return (0.0, 0.0, 0.0)
 
     # ------------------------------------------------------------------
     def _set(self, name, value):
@@ -256,25 +279,56 @@ class TerrainRenderer:
             (treble > 0.88    and self._rng.random() > 0.75)
         )
 
+        # Smoothly decay the beat glow factor
+        self.beat_glow *= 0.90  # decay rate
+
+        # Spike the glow on a beat
+        if beat_pulse > 0.5:
+            if not self.last_frame_was_beat:
+                self.beat_glow = 1.0
+                self.last_frame_was_beat = True
+        else:
+            self.last_frame_was_beat = False
+
         if is_lightning:
             ambient_val = 1.05
             self._set("light_dir", (
                 self._rng.uniform(-1.5, 1.5), 2.0, self._rng.uniform(-1.5, 1.5)
             ))
         else:
-            ambient_val = 0.50 + mid * 0.15
+            ambient_val = 0.50 + mid * 0.15 + self.beat_glow * 0.40
             self._set("light_dir", (1.0, 1.5, -0.8))    # sideways+up: vertical walls catch it
 
-        sky      = (0.02, 0.01, 0.04)                    # background behind the canyon
-        fog_glow = (0.75, 0.42 + treble * 0.2, 0.95)     # light pouring down the slot
+        sky = (0.02, 0.01, 0.04)                    # background behind the canyon
+
+        # Base hue shifts slowly over time (takes ~20 seconds to cycle the full color wheel)
+        base_hue = (frame_index * 0.0008) % 1.0
+
+        # Calculate dynamic RGB colors based on base_hue and beat_glow
+        # When a beat hits, the rim glows (boost brightness and lower saturation slightly for a hot glowing neon core look)
+        rim_glow_sat = 0.85 - self.beat_glow * 0.45
+        rim_glow_val = 1.0 + self.beat_glow * 0.60
+        r_rim, g_rim, b_rim = self._hsv_to_rgb(base_hue, rim_glow_sat, rim_glow_val)
+        rim_intensity = 0.85 + treble * 0.15
+        col_rim = (r_rim * rim_intensity, g_rim * rim_intensity, b_rim * rim_intensity)
+
+        # Mid-tone also glows and is shifted
+        mid_glow_val = 0.6 + self.beat_glow * 0.40
+        r_mid, g_mid, b_mid = self._hsv_to_rgb((base_hue - 0.1) % 1.0, 0.9, mid_glow_val)
+        col_mid = (r_mid, g_mid, b_mid)
+
+        # Fog glow (light pouring down the slot) matches the dynamic wall color
+        r_fog, g_fog, b_fog = self._hsv_to_rgb(base_hue, 0.5, 0.8)
+        fog_glow = (r_fog, g_fog * (0.8 + treble * 0.2), b_fog)
+
+        # Floor color matches the sky background for a seamless look
+        col_floor = sky
 
         self._set("ambient",   ambient_val)
         self._set("fog_color", fog_glow)
-
-        # Vertical palette: near-black floor → purple mid → hot magenta rim
-        self._set("col_floor", (0.20, 0.04, 0.30))
-        self._set("col_mid",   (0.55, 0.10, 0.80))
-        self._set("col_rim",   (1.0, 0.55 + treble * 0.35, 1.0))
+        self._set("col_floor", col_floor)
+        self._set("col_mid",   col_mid)
+        self._set("col_rim",   col_rim)
 
         # ----------------------------------------------------------------
         # Camera — inside the canyon, low, looking down the corridor

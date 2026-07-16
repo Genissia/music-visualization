@@ -13,7 +13,7 @@ from renderer import TerrainRenderer
 def _progress_bar(current: int, total: int, bar_width: int = 30) -> str:
     frac = current / max(total, 1)
     filled = int(bar_width * frac)
-    bar = "█" * filled + "░" * (bar_width - filled)
+    bar = "#" * filled + "-" * (bar_width - filled)
     return f"[{bar}] {current}/{total} ({frac * 100:.1f}%)"
 
 
@@ -83,9 +83,9 @@ def generate_video(
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        print("  ✓ FFmpeg pipe established.")
+        print("  [OK] FFmpeg pipe established.")
     except FileNotFoundError:
-        print("\n  ✗ FFmpeg not found. Install it and add it to your PATH.")
+        print("\n  [ERROR] FFmpeg not found. Install it and add it to your PATH.")
         return
 
     start_time = time.time()
@@ -125,7 +125,7 @@ def generate_video(
             bar     = _progress_bar(i + 1, num_frames)
             print(f"  {bar}  |  {speed:.1f} fps  |  ETA {eta:.0f}s", end="\r")
 
-    print("\n\n  Closing streams and finalising video…")
+    print("\n\n  Closing streams and finalising video...")
     ffmpeg_process.stdin.close()
     ffmpeg_process.communicate()
 
@@ -133,16 +133,16 @@ def generate_video(
 
     if ffmpeg_process.returncode == 0:
         size_mb = os.path.getsize(output_video) / (1024 * 1024)
-        print(f"\n  ✓ SUCCESS: '{output_video}' ({size_mb:.1f} MB)")
+        print(f"\n  [OK] SUCCESS: '{output_video}' ({size_mb:.1f} MB)")
         print(f"  Render time: {total:.1f}s ({num_frames / total:.1f} fps average)")
     else:
-        print("\n  ✗ FFmpeg failed. Check the audio file format.")
+        print("\n  [ERROR] FFmpeg failed. Check the audio file format.")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Music Slot-Canyon Visualizer")
-    parser.add_argument("audio", nargs="?", default="acdc_Thunderstruck.mp3")
-    parser.add_argument("-o", "--output", default="visual_landscape.mp4")
+    parser.add_argument("audio", nargs="?", default="acdc_Thunderstruck-[AudioTrimmer.com].mp3")
+    parser.add_argument("-o", "--output", default="visual_landscape1001.mp4")
     parser.add_argument("--fps",    type=int, default=60)
     parser.add_argument("--grid",   type=int, default=150, help="depth resolution")
     parser.add_argument("--height", type=int, default=40,  help="wall vertical resolution")
